@@ -51,37 +51,64 @@ Default is to scan subfolders of current directory."
   (repo-scan-core
    (directory-files (or dir default-directory) t)))
 
+(defcustom repo-scan-use-absolute-names nil
+  "If non-nil, use absolute names in repo-scan output."
+  :type 'boolean
+  :group 'repo-scan)
+
 (defun repo-scan-core (repos)
   "Display buffer explaining git status of REPOS.
 Show which repos have uncommitted changes, and which have
 unpushed commits.  Ignores anything that is not a git repo."
   (interactive)
   (let ((buffer (get-buffer-create "*repo-scan*"))
-        (counter 0))
+        (counter 0)
+        (unflagged-repos nil))
     (with-current-buffer buffer
       (erase-buffer)
       (dolist (repo repos)
         (when (and (file-directory-p repo)
                    (not (member (file-name-nondirectory repo) '("." "..")))
                    (magit-git-repo-p repo t))
-          (let ((default-directory repo))
+          (let ((default-directory repo)
+                (flag nil)
+                (name
+                 (if repo-scan-use-absolute-names
+                     repo
+                   (file-name-nondirectory repo))))
             (unless (string-empty-p (shell-command-to-string "git status --porcelain"))
+              (setq flag t)
               (insert (concat
                        (number-to-string (cl-incf counter))
                        ". ["
                        "[elisp:(magit-status " "\"" repo "\")]"
-                       "[" repo "]] (uncommitted changes)\n")))
+                       "[" name "]] (uncommitted changes)\n")))
             (unless (string-empty-p (shell-command-to-string
                                      (concat "git log "
                                              (magit-get-upstream-branch)
                                              "..HEAD")))
+              (setq flag t)
               (insert (concat
                        (number-to-string (cl-incf counter))
                        ". ["
                        "[elisp:(magit-status " "\"" repo "\")]"
-                       "[" repo "]] (unpushed changes)\n"))))))
+                       "[" name "]] (unpushed changes)\n")))
+            (unless flag
+              (push repo unflagged-repos)))))
       (switch-to-buffer-other-window buffer)
       (org-mode)
+      (goto-char (point-max))
+      (insert "\n\nUnflagged repos:\n")
+      (dolist (repo (reverse unflagged-repos))
+        (insert (concat
+                 (number-to-string (cl-incf counter))
+                 ". ["
+                 "[elisp:(magit-status " "\"" repo "\")]"
+                 "["
+                 (if repo-scan-use-absolute-names
+                     repo
+                   (file-name-nondirectory repo))
+                 "]]  ")))
       (goto-char (point-min))
       counter)))
 
