@@ -59,11 +59,9 @@ Default is to scan subfolders of current directory."
 (defun repo-scan-get-status (repo)
   "Get status of REPO."
   (let ((default-directory repo))
-    (if (not (file-exists-p ".git"))
+    (if (not (magit-git-repo-p repo))
         '(not-a-repo)
       (append
-       ;; check if .git file exists
-
        (if (string-empty-p (shell-command-to-string "git status --porcelain"))
            nil
          '(uncommitted))
@@ -132,6 +130,18 @@ unpushed commits.  Ignores anything that is not a git repo."
   "Scan repos in my elpaca directory."
   (interactive)
   (repo-scan (concat user-emacs-directory "elpaca/repos")))
+
+(defun repo-scan-pull (repos)
+  (let (flagged-repos)
+    (dolist (repo repos)
+      (when (magit-git-repo-p repo)
+        (let ((status (repo-scan-get-status repo)))
+          (if status
+              (push repo flagged-repos)
+            (let ((default-directory repo))
+              (shell-command "git pull"))))))
+    (when flagged-repos
+      (repo-scan-core flagged-repos))))
 
 (provide 'repo-scan)
 ;;; repo-scan.el ends here
