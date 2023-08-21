@@ -56,6 +56,24 @@ Default is to scan subfolders of current directory."
   :type 'boolean
   :group 'repo-scan)
 
+(defun repo-scan-get-status (repo)
+  "Get status of REPO."
+  (let ((default-directory repo))
+    (if (not (file-exists-p ".git"))
+        '(not-a-repo)
+      (append
+       ;; check if .git file exists
+
+       (if (string-empty-p (shell-command-to-string "git status --porcelain"))
+           nil
+         '(uncommitted))
+       (if (string-empty-p (shell-command-to-string
+                            (concat "git log "
+                                    (magit-get-upstream-branch)
+                                    "..HEAD")))
+           nil
+         '(unpushed))))))
+
 (defun repo-scan-core (repos)
   "Display buffer explaining git status of REPOS.
 Show which repos have uncommitted changes, and which have
@@ -70,23 +88,20 @@ unpushed commits.  Ignores anything that is not a git repo."
         (when (and (file-directory-p repo)
                    (not (member (file-name-nondirectory repo) '("." "..")))
                    (magit-git-repo-p repo t))
-          (let ((default-directory repo)
-                (flag nil)
-                (name
-                 (if repo-scan-use-absolute-names
-                     repo
-                   (file-name-nondirectory repo))))
-            (unless (string-empty-p (shell-command-to-string "git status --porcelain"))
+          (let* ((default-directory repo)
+                 (flag nil)
+                 (name (if repo-scan-use-absolute-names
+                           repo
+                         (file-name-nondirectory repo)))
+                 (status (repo-scan-get-status repo)))
+            (when (member 'uncommitted status)
               (setq flag t)
               (insert (concat
                        (number-to-string (cl-incf counter))
                        ". ["
                        "[elisp:(magit-status " "\"" repo "\")]"
                        "[" name "]] (uncommitted changes)\n")))
-            (unless (string-empty-p (shell-command-to-string
-                                     (concat "git log "
-                                             (magit-get-upstream-branch)
-                                             "..HEAD")))
+            (when (member 'unpushed status)
               (setq flag t)
               (insert (concat
                        (number-to-string (cl-incf counter))
