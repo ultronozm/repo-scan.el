@@ -132,14 +132,16 @@ unpushed commits.  Ignores anything that is not a git repo."
   (repo-scan (concat user-emacs-directory "elpaca/repos")))
 
 (defun repo-scan-pull (repos)
-  (let (flagged-repos)
+  (let ((buffer (get-buffer-create "*repo-scan-pull*"))
+        flagged-repos)
     (dolist (repo repos)
       (when (magit-git-repo-p repo)
         (let ((status (repo-scan-get-status repo)))
           (if status
               (push repo flagged-repos)
             (let ((default-directory repo))
-              (shell-command "git pull"))))))
+              (with-current-buffer buffer
+                (insert (shell-command-to-string "git pull"))))))))
     (when flagged-repos
       (repo-scan-core flagged-repos))))
 
