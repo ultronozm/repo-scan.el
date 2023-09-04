@@ -134,6 +134,8 @@ unpushed commits.  Ignores anything that is not a git repo."
 (defun repo-scan-pull (repos)
   (let ((buffer (get-buffer-create "*repo-scan-pull*"))
         flagged-repos)
+    (with-current-buffer buffer
+      (erase-buffer))
     (dolist (repo repos)
       (when (magit-git-repo-p repo)
         (let ((status (repo-scan-get-status repo)))
@@ -141,9 +143,10 @@ unpushed commits.  Ignores anything that is not a git repo."
               (push repo flagged-repos)
             (let ((default-directory repo))
               (with-current-buffer buffer
-                (insert (shell-command-to-string "git pull"))))))))
+                (insert (format "%s: " repo) (shell-command-to-string "git pull"))))))))
     (when flagged-repos
-      (repo-scan-core flagged-repos))))
+      (repo-scan-core flagged-repos))
+    (display-buffer buffer)))
 
 (provide 'repo-scan)
 ;;; repo-scan.el ends here
