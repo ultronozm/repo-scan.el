@@ -131,6 +131,7 @@ unpushed commits.  Ignores anything that is not a git repo."
   (interactive)
   (repo-scan (concat user-emacs-directory "elpaca/repos")))
 
+;;;###autoload
 (defun repo-scan-pull (repos)
   (let ((buffer (get-buffer-create "*repo-scan-pull*"))
         flagged-repos)
