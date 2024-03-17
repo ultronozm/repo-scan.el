@@ -33,11 +33,6 @@
 ;; have unpushed changes.  Click on the links to open magit status
 ;; buffers for the repos.
 ;;
-;; Sample use-package declaration:
-;;
-;; (use-package repo-scan
-;;   :vc (:url "https://github.com/ultronozm/repo-scan.el.git"
-;;             :rev :newest))
 
 ;;; Code:
 
