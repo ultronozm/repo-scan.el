@@ -4,8 +4,8 @@
 
 ;; Author: Paul D. Nelson <nelson.paul.david@gmail.com>
 ;; Version: 0.0
-;; URL: https://github.com/ultronozm/czm-tex-fold.el
-;; Package-Requires: ((emacs "29.1") (magit "3.0"))
+;; URL: https://github.com/ultronozm/repo-scan.el
+;; Package-Requires: ((emacs "29.1") (magit "3.0") (consult "1.0"))
 ;; Keywords: convenience, git
 
 ;; This program is free software; you can redistribute it and/or modify
@@ -25,31 +25,44 @@
 
 ;; Display status of some collection of GIT repositories in a buffer
 ;; with clickable links.  Useful for checking if you've committed and
-;; pushed all changes to my package repos.
+;; pushed all changes to your package repos.
 ;;
-;; Usage: navigate to a directory containing subdirectories that are
-;; git repos, and run M-x repo-scan.  A buffer will pop up with a list
-;; of repos that have uncommitted changes, and a list of repos that
-;; have unpushed changes.  Click on the links to open magit status
-;; buffers for the repos.
+;; Usage:
+;; 1. Basic scanning: Navigate to a directory containing subdirectories that are
+;;    git repos, and run M-x repo-scan.
+;; 2. For maintained repositories: Customize `repo-scan-repos' and use
+;;    `repo-scan-pull-all', `repo-scan-check-compiled', or `repo-scan-search'.
 ;;
 
 ;;; Code:
 
 (require 'magit)
+(require 'consult)
 
-;;;###autoload
-(defun repo-scan (&optional dir)
-  "Display buffer explaining git status for subfolders of DIR.
-Default is to scan subfolders of current directory."
-  (interactive)
-  (repo-scan-core
-   (directory-files (or dir default-directory) t)))
+(defgroup repo-scan nil
+  "Display status of GIT repositories."
+  :group 'tools)
+
+(defcustom repo-scan-repos nil
+  "List of repository names to scan.
+These should be the base names of repositories in your elpaca/repos directory."
+  :type '(repeat string)
+  :group 'repo-scan)
 
 (defcustom repo-scan-use-absolute-names nil
   "If non-nil, use absolute names in repo-scan output."
   :type 'boolean
   :group 'repo-scan)
+
+(defcustom repo-scan-base-directory
+  (concat user-emacs-directory "elpaca/repos")
+  "Base directory containing the repositories to scan."
+  :type 'directory
+  :group 'repo-scan)
+
+(defun repo-scan--get-repo-path (name)
+  "Convert repository NAME to full path using `repo-scan-base-directory'."
+  (expand-file-name name repo-scan-base-directory))
 
 (defun repo-scan-get-status (repo)
   "Get status of REPO."
@@ -61,11 +74,19 @@ Default is to scan subfolders of current directory."
            nil
          '(uncommitted))
        (if (string-empty-p (shell-command-to-string
-                            (concat "git log "
-                                    (magit-get-upstream-branch)
-                                    "..HEAD")))
+                           (concat "git log "
+                                   (magit-get-upstream-branch)
+                                   "..HEAD")))
            nil
          '(unpushed))))))
+
+;;;###autoload
+(defun repo-scan (&optional dir)
+  "Display buffer explaining git status for subfolders of DIR.
+Default is to scan subfolders of current directory."
+  (interactive)
+  (repo-scan-core
+   (directory-files (or dir default-directory) t)))
 
 (defun repo-scan-core (repos)
   "Display buffer explaining git status of REPOS.
@@ -122,12 +143,14 @@ unpushed commits.  Ignores anything that is not a git repo."
 
 ;;;###autoload
 (defun repo-scan-elpaca ()
-  "Scan repos in my elpaca directory."
+  "Scan repos in elpaca directory specified by `repo-scan-base-directory'."
   (interactive)
-  (repo-scan (concat user-emacs-directory "elpaca/repos")))
+  (repo-scan repo-scan-base-directory))
 
 ;;;###autoload
 (defun repo-scan-pull (repos)
+  "Pull changes for REPOS that have no uncommitted changes.
+Display status for repos that do have uncommitted changes."
   (let ((buffer (get-buffer-create "*repo-scan-pull*"))
         flagged-repos)
     (with-current-buffer buffer
@@ -143,6 +166,40 @@ unpushed commits.  Ignores anything that is not a git repo."
     (when flagged-repos
       (repo-scan-core flagged-repos))
     (display-buffer buffer)))
+
+;;;###autoload
+(defun repo-scan-pull-all ()
+  "Pull all repositories listed in `repo-scan-repos'."
+  (interactive)
+  (let ((repos (mapcar #'repo-scan--get-repo-path repo-scan-repos)))
+    (repo-scan-pull repos)))
+
+;;;###autoload
+(defun repo-scan-check-compiled ()
+  "Check which repos have uncompiled .el files.
+Specifically, checks for missing .elc files in the elpaca builds directory."
+  (interactive)
+  (dolist (name repo-scan-repos)
+    (let ((elc-file
+           (concat user-emacs-directory
+                   (file-name-as-directory "elpaca")
+                   (file-name-as-directory "builds")
+                   (file-name-as-directory name)
+                   name ".elc")))
+      (unless (file-exists-p elc-file)
+        (message "%s.elc not found" name)))))
+
+;;;###autoload
+(defun repo-scan-search ()
+  "Search through all Elisp files in repositories listed in `repo-scan-repos'."
+  (interactive)
+  (let ((files (mapcan
+                (lambda (name)
+                  (directory-files-recursively
+                   (repo-scan--get-repo-path name)
+                   "\\.el\\'"))
+                repo-scan-repos)))
+    (consult--grep "Ripgrep" #'consult--ripgrep-make-builder files nil)))
 
 (provide 'repo-scan)
 ;;; repo-scan.el ends here
