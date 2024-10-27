@@ -182,7 +182,7 @@ Specifically, checks for missing .elc files in the elpaca builds directory."
   (dolist (name repo-scan-repos)
     (let ((elc-file
            (locate-user-emacs-file
-            (expand-file-name (concat name ".elc")
+            (expand-file-name (file-name-with-extension name "elc")
                               (expand-file-name name "elpaca/builds")))))
       (unless (file-exists-p elc-file)
         (message "%s.elc not found" name)))))
