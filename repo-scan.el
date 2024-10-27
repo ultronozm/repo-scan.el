@@ -55,7 +55,7 @@ These should be the base names of repositories in your elpaca/repos directory."
   :group 'repo-scan)
 
 (defcustom repo-scan-base-directory
-  (concat user-emacs-directory "elpaca/repos")
+  (expand-file-name "elpaca/repos/" user-emacs-directory)
   "Base directory containing the repositories to scan."
   :type 'directory
   :group 'repo-scan)
@@ -181,11 +181,9 @@ Specifically, checks for missing .elc files in the elpaca builds directory."
   (interactive)
   (dolist (name repo-scan-repos)
     (let ((elc-file
-           (concat user-emacs-directory
-                   (file-name-as-directory "elpaca")
-                   (file-name-as-directory "builds")
-                   (file-name-as-directory name)
-                   name ".elc")))
+           (locate-user-emacs-file
+            (expand-file-name (concat name ".elc")
+                              (expand-file-name name "elpaca/builds")))))
       (unless (file-exists-p elc-file)
         (message "%s.elc not found" name)))))
 
