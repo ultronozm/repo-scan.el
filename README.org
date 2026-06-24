@@ -50,7 +50,7 @@ In the dashboard:
 | =RET= | Open =vc-dir= for the repository |
 | =j= | Open Dired at the repository root |
 | =C-x g= | Open Magit status for the repository, when Magit is available |
-| === | Show a useful diff for the repository |
+| ~=~ | Show a useful diff for the repository |
 | =l= | Show a compact Git log for the current or selected drift branch |
 | =f= | Fetch all remotes for the current repository |
 | =F= | Fetch all remotes for all known repositories asynchronously |
@@ -85,9 +85,8 @@ The =*= prefix marks repositories by state:
 The dashboard is provider-based.  The default provider reads manifest files, but
 you can include other sources.
 
-The package does not assume a package-manager directory.  To scan package
-repositories, set =repo-dashboard-emacs-package-roots= to one-level package
-clone roots and add the source:
+To scan package repositories, set =repo-dashboard-emacs-package-roots= to
+one-level package clone roots and add the source:
 
 #+begin_src emacs-lisp
 (setopt repo-dashboard-emacs-package-roots
