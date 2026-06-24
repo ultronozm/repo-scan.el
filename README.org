@@ -38,6 +38,18 @@ Each non-comment line of each manifest file should begin with a path and origin 
 | =repo-dashboard-diff-buffer-name= | Diff buffer name |
 | =repo-dashboard-log-buffer-name= | Log buffer name |
 
+* Example configuration
+
+Here is a complete example config using [[https://github.com/progfolio/elpaca][elpaca]]:
+
+#+begin_src emacs-lisp
+(use-package repo-dashboard
+  :ensure (:host github :repo "ultronozm/repo-dashboard.el")
+  :defer t
+  :custom
+  (repo-dashboard-manifest-files '("~/dotfiles/repos.manifest")))
+#+end_src
+
 * Usage
 
 In the dashboard:
