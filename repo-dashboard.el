@@ -78,8 +78,7 @@ Enable this by adding `repo-dashboard-source-extra-roots' to
   :type '(repeat directory)
   :group 'repo-dashboard)
 
-(defcustom repo-dashboard-emacs-package-roots
-  (list (expand-file-name "elpaca/repos" user-emacs-directory))
+(defcustom repo-dashboard-emacs-package-roots nil
   "Directories whose immediate Git children are Emacs package repos.
 Enable this by adding `repo-dashboard-source-emacs-package-roots' to
 `repo-dashboard-sources'."

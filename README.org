@@ -13,7 +13,7 @@ remote-mismatch information as rows finish.
 
 Customize =repo-dashboard-manifest-files= to specify your manifest files, e.g.:
 #+begin_src elisp
-(setopt repo-dashboard-manifest-files ("~/dotfiles/repos.manifest"))
+(setopt repo-dashboard-manifest-files '("~/dotfiles/repos.manifest"))
 #+end_src
 
 Each non-comment line of each manifest file should begin with a path and origin URL.  Blank lines and lines starting with =#= are ignored.  A third field may specify an extra remote as =NAME=URL=.  Extra fields are ignored.  Example:
@@ -22,6 +22,21 @@ Each non-comment line of each manifest file should begin with a path and origin 
 ~/work/fork git@github.com:user/fork.git upstream=https://github.com/upstream/fork.git
 #+end_example
 
+* Customization
+
+| Variable | Purpose |
+|----------+---------|
+| =repo-dashboard-manifest-files= | Manifest files read by the default source |
+| =repo-dashboard-sources= | Source functions that return repository descriptors |
+| =repo-dashboard-extra-roots= | One-level Git repository roots for the extra-roots source |
+| =repo-dashboard-emacs-package-roots= | One-level package clone roots for the Emacs package source |
+| =repo-dashboard-refresh-concurrency= | Maximum number of async scan subprocesses |
+| =repo-dashboard-git-program= | Git executable |
+| =repo-dashboard-fetch-arguments= | Git arguments used by =repo-dashboard-fetch= |
+| =repo-dashboard-buffer-name= | Dashboard buffer name |
+| =repo-dashboard-command-buffer-name= | Shell command output buffer name |
+| =repo-dashboard-diff-buffer-name= | Diff buffer name |
+| =repo-dashboard-log-buffer-name= | Log buffer name |
 
 * Usage
 
@@ -52,10 +67,6 @@ Prefix arguments are passed along, so =C-u += and =C-u P= behave like prefix cal
 
 The default safe bulk action is intentionally narrow: =git pull --ff-only= on a clean current branch whose upstream is behind and not ahead.  It does not push, delete branches, merge divergent branches, or touch dirty working trees.
 
-* Async refresh
-
-Customize =repo-dashboard-refresh-concurrency= to control how many scan subprocesses run at once.
-
 * Mark helpers
 
 The =*= prefix marks repositories by state:
@@ -74,9 +85,13 @@ The =*= prefix marks repositories by state:
 The dashboard is provider-based.  The default provider reads manifest files, but
 you can include other sources.
 
-To scan package repositories under =~/.emacs.d/elpaca/repos=:
+The package does not assume a package-manager directory.  To scan package
+repositories, set =repo-dashboard-emacs-package-roots= to one-level package
+clone roots and add the source:
 
 #+begin_src emacs-lisp
+(setopt repo-dashboard-emacs-package-roots
+        (list (expand-file-name "elpaca/repos" user-emacs-directory)))
 (add-to-list 'repo-dashboard-sources
              'repo-dashboard-source-emacs-package-roots
              t)
@@ -92,6 +107,4 @@ For other one-level roots, customize =repo-dashboard-extra-roots= and add
 =repo-dashboard-source-extra-roots= to =repo-dashboard-sources=.
 
 Large package roots can contain hundreds of Git repositories.  Keep this source
-opt-in if you mostly want the fast manifest view, and lower
-=repo-dashboard-refresh-concurrency= if scanning too many packages at once is
-too noisy for your machine.
+opt-in if you mostly want the fast manifest view.
