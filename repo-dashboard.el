@@ -91,14 +91,6 @@ Enable this by adding `repo-dashboard-source-emacs-package-roots' to
   :type 'string
   :group 'repo-dashboard)
 
-(defcustom repo-dashboard-async-refresh t
-  "Non-nil means refresh repository state asynchronously.
-When enabled, `repo-dashboard-refresh' renders placeholder rows
-immediately and fills them in as background scans finish.  A prefix
-argument to `repo-dashboard-refresh' forces a synchronous refresh."
-  :type 'boolean
-  :group 'repo-dashboard)
-
 (defcustom repo-dashboard-refresh-concurrency 6
   "Maximum number of repository scan subprocesses to run at once."
   :type 'natnum
@@ -531,12 +523,6 @@ CURRENT-BRANCH is used to mark the current row."
   (cl-loop for status in (plist-get record :branches)
            sum (plist-get status :behind)))
 
-(defun repo-dashboard--deploy-status (record)
-  "Return local deploy branch status from RECORD, or nil."
-  (seq-find (lambda (status)
-              (string= (plist-get status :branch) "deploy"))
-            (plist-get record :branches)))
-
 (defun repo-dashboard--safe-pull-p (record)
   "Return non-nil when RECORD can be pulled safely by default."
   (let ((current (repo-dashboard--current-branch-status record)))
@@ -565,7 +551,6 @@ CURRENT-BRANCH is used to mark the current row."
             (unpushed (plist-get record :unpushed))
             (remote-problems (plist-get record :remote-problems))
             (current (repo-dashboard--current-branch-status record))
-            (deploy (repo-dashboard--deploy-status record))
             (branches (repo-dashboard--problem-branches record))
             (current-ahead (or (and current (plist-get current :ahead)) 0))
             (current-behind (or (and current (plist-get current :behind)) 0)))
@@ -580,21 +565,18 @@ CURRENT-BRANCH is used to mark the current row."
          "pullable")
         ((> current-ahead 0)
          "pushable")
-        ((and deploy
-              (not (plist-get deploy :current))
-              (> (plist-get deploy :ahead) 0)
-              (> (plist-get deploy :behind) 0))
-         "deploy diverged")
-        ((and deploy
-              (not (plist-get deploy :current))
-              (zerop (plist-get deploy :ahead))
-              (> (plist-get deploy :behind) 0))
-         "stale deploy")
         ((> unpushed 0)
          "unpushed")
         (branches "branch drift")
         (t "ok"))))
     (_ "unknown")))
+
+(defun repo-dashboard--plist-merge (base &rest props)
+  "Return a copy of BASE with PROPS merged in, overwriting existing keys."
+  (let ((result (copy-sequence base)))
+    (while props
+      (setq result (plist-put result (pop props) (pop props))))
+    result))
 
 (defun repo-dashboard--scan (descriptor)
   "Return dashboard status record for repository DESCRIPTOR."
@@ -604,48 +586,47 @@ CURRENT-BRANCH is used to mark the current row."
                     (repo-dashboard--git-root path))))
     (cond
      ((not (file-exists-p path))
-      (append base
-              (list :kind 'missing
-                    :state "missing"
-                    :dirty 0
-                    :unpushed 0
-                    :ahead 0
-                    :behind 0
-                    :branches nil)))
+      (repo-dashboard--plist-merge base
+                                   :kind 'missing
+                                   :state "missing"
+                                   :branch ""
+                                   :dirty 0
+                                   :unpushed 0
+                                   :ahead 0
+                                   :behind 0
+                                   :branches nil))
      ((not root)
-      (append base
-              (list :kind 'non-git
-                    :state "not git"
-                    :dirty 0
-                    :unpushed 0
-                    :ahead 0
-                    :behind 0
-                    :branches nil)))
+      (repo-dashboard--plist-merge base
+                                   :kind 'non-git
+                                   :state "not git"
+                                   :branch ""
+                                   :dirty 0
+                                   :unpushed 0
+                                   :ahead 0
+                                   :behind 0
+                                   :branches nil))
      (t
       (let* ((branch (repo-dashboard--current-branch root))
              (branches (repo-dashboard--branch-statuses root branch))
-             (record (append
+             (record (repo-dashboard--plist-merge
                       base
-                      (list :kind 'git
-                            :path root
-                            :display-path (repo-dashboard--short-path root)
-                            :branch (or branch
-                                        (format "(detached %s)"
-                                                (or (repo-dashboard--short-head root)
-                                                    "?")))
-                            :remote-problems
-                            (repo-dashboard--remote-problems root descriptor)
-                            :dirty (repo-dashboard--dirty-count root)
-                            :unpushed (repo-dashboard--unpushed-count root)
-                            :branches branches))))
-        (setq record (plist-put record :path root))
-        (setq record (plist-put record :display-path
-                                (repo-dashboard--short-path root)))
-        (setq record (append record
-                             (list :ahead (repo-dashboard--record-ahead record)
-                                   :behind (repo-dashboard--record-behind record))))
-        (plist-put record :state (repo-dashboard--record-state record))
-        record)))))
+                      :kind 'git
+                      :path root
+                      :display-path (repo-dashboard--short-path root)
+                      :branch (or branch
+                                  (format "(detached %s)"
+                                          (or (repo-dashboard--short-head root)
+                                              "?")))
+                      :remote-problems
+                      (repo-dashboard--remote-problems root descriptor)
+                      :dirty (repo-dashboard--dirty-count root)
+                      :unpushed (repo-dashboard--unpushed-count root)
+                      :branches branches)))
+        (setq record (plist-put record :ahead
+                                (repo-dashboard--record-ahead record)))
+        (setq record (plist-put record :behind
+                                (repo-dashboard--record-behind record)))
+        (plist-put record :state (repo-dashboard--record-state record)))))))
 
 ;;; Display formatting
 
@@ -723,12 +704,10 @@ CURRENT-BRANCH is used to mark the current row."
     ("dirty+drift" 3)
     ("dirty" 4)
     ("diverged" 5)
-    ("deploy diverged" 6)
-    ("pullable" 7)
-    ("pushable" 8)
-    ("stale deploy" 9)
-    ("branch drift" 10)
-    ("unpushed" 11)
+    ("pullable" 6)
+    ("pushable" 7)
+    ("branch drift" 8)
+    ("unpushed" 9)
     ("scanning" 98)
     ("ok" 99)
     (_ 50)))
@@ -779,7 +758,7 @@ CURRENT-BRANCH is used to mark the current row."
       (if (> scanning 0) (format "  Scanning:%d" scanning) "")
       (if (> errors 0) (format "  Errors:%d" errors) "")
       missing remote-problems dirty pullable pushable drift)
-     "   RET:vc-dir  j:dired  =:diff  +:pull  P:push  x/X:safe pull  ?:help")))
+     "   RET:vc-dir  j:dired  =:diff  .:rescan  +:pull  P:push  x/X:safe pull  ?:help")))
 
 (defun repo-dashboard--current-position-state (&optional position)
   "Return row state at POSITION, or point when POSITION is nil."
@@ -959,18 +938,42 @@ CURRENT-BRANCH is used to mark the current row."
 
 ;;; Dashboard refresh
 
-(defun repo-dashboard--render (&optional old-state)
-  "Render `repo-dashboard--records', restoring OLD-STATE when non-nil."
+(defun repo-dashboard--save-window-starts ()
+  "Return an alist of (WINDOW . START) for windows showing this buffer."
+  (let (result)
+    (walk-windows
+     (lambda (w)
+       (when (eq (window-buffer w) (current-buffer))
+         (push (cons w (window-start w)) result)))
+     nil t)
+    result))
+
+(defun repo-dashboard--restore-window-starts (saved)
+  "Restore window-start positions from SAVED."
+  (dolist (entry saved)
+    (when (window-live-p (car entry))
+      (set-window-start (car entry) (cdr entry) t))))
+
+(defun repo-dashboard--render (&optional old-state skip-sort)
+  "Render `repo-dashboard--records', restoring OLD-STATE when non-nil.
+When SKIP-SORT is non-nil, preserve the current record order and
+window scroll positions."
   (repo-dashboard--ensure-mark-table)
   (let* ((old-state (or old-state (repo-dashboard--current-position-state)))
-         (records (sort (copy-sequence repo-dashboard--records)
-                        #'repo-dashboard--record<))
+         (window-starts (when skip-sort
+                          (repo-dashboard--save-window-starts)))
+         (records (if skip-sort
+                      (copy-sequence repo-dashboard--records)
+                    (sort (copy-sequence repo-dashboard--records)
+                          #'repo-dashboard--record<)))
          (entries (mapcar #'repo-dashboard--entry records)))
     (setq repo-dashboard--records records)
     (setq header-line-format (repo-dashboard--header-line records))
     (setq tabulated-list-entries entries)
     (tabulated-list-print (not repo-dashboard--preserve-row))
-    (repo-dashboard--restore-position old-state entries)))
+    (repo-dashboard--restore-position old-state entries)
+    (when window-starts
+      (repo-dashboard--restore-window-starts window-starts))))
 
 (defun repo-dashboard--async-refresh-available-p ()
   "Return non-nil when async refresh can start subprocesses."
@@ -1045,12 +1048,13 @@ CURRENT-BRANCH is used to mark the current row."
                     repo-dashboard--scan-completed
                     (1+ repo-dashboard--scan-completed))
               (repo-dashboard--replace-record key record)
-              (repo-dashboard--render old-state)
               (repo-dashboard--start-next-scans)
-              (when (and (null repo-dashboard--scan-queue)
-                         (null repo-dashboard--scan-active))
-                (message "Repo Dashboard scanned %d repo(s)"
-                         repo-dashboard--scan-completed)))))))
+              (let ((scanning-p (or repo-dashboard--scan-queue
+                                    repo-dashboard--scan-active)))
+                (repo-dashboard--render old-state scanning-p)
+                (unless scanning-p
+                  (message "Repo Dashboard scanned %d repo(s)"
+                           repo-dashboard--scan-completed))))))))
       (when-let* ((buffer (process-buffer process))
                   ((buffer-live-p buffer)))
         (kill-buffer buffer))))
@@ -1084,7 +1088,6 @@ CURRENT-BRANCH is used to mark the current row."
 
 (defun repo-dashboard-refresh-sync ()
   "Refresh the current repository dashboard synchronously."
-  (interactive)
   (repo-dashboard--ensure-mark-table)
   (setq repo-dashboard--scan-generation (1+ repo-dashboard--scan-generation))
   (repo-dashboard--cancel-async-scans)
@@ -1098,7 +1101,6 @@ CURRENT-BRANCH is used to mark the current row."
 
 (defun repo-dashboard-refresh-async ()
   "Refresh the current repository dashboard asynchronously."
-  (interactive)
   (repo-dashboard--ensure-mark-table)
   (setq repo-dashboard--scan-generation (1+ repo-dashboard--scan-generation))
   (repo-dashboard--cancel-async-scans)
@@ -1118,15 +1120,24 @@ CURRENT-BRANCH is used to mark the current row."
                    repo-dashboard--scan-total))
       (message "Repo Dashboard has no repositories"))))
 
-(defun repo-dashboard-refresh (&optional synchronous)
-  "Refresh the current repository dashboard.
-With prefix argument SYNCHRONOUS, scan repositories synchronously."
-  (interactive "P")
-  (if (and repo-dashboard-async-refresh
-           (not synchronous)
-           (repo-dashboard--async-refresh-available-p))
+(defun repo-dashboard-refresh ()
+  "Refresh the current repository dashboard."
+  (interactive)
+  (if (repo-dashboard--async-refresh-available-p)
       (repo-dashboard-refresh-async)
     (repo-dashboard-refresh-sync)))
+
+(defun repo-dashboard-refresh-at-point ()
+  "Rescan the repository at point, or all marked repositories."
+  (interactive)
+  (let* ((records (repo-dashboard--records-for-action))
+         (old-state (repo-dashboard--current-position-state)))
+    (dolist (record records)
+      (let* ((key (repo-dashboard--scan-key record))
+             (new-record (repo-dashboard--scan record)))
+        (repo-dashboard--replace-record key new-record)))
+    (repo-dashboard--render old-state)
+    (message "Rescanned %d repo(s)" (length records))))
 
 (defun repo-dashboard-next-line ()
   "Move to the next dashboard row."
@@ -1168,20 +1179,31 @@ With prefix argument SYNCHRONOUS, scan repositories synchronously."
     (user-error "Magit is not available"))
   (magit-status (repo-dashboard--record-directory (repo-dashboard--require-record))))
 
+(defun repo-dashboard--find-vc-dir-buffer (dir)
+  "Return an existing `vc-dir' buffer for DIR, or nil."
+  (let ((target (file-name-as-directory (expand-file-name dir))))
+    (seq-find
+     (lambda (buf)
+       (with-current-buffer buf
+         (and (derived-mode-p 'vc-dir-mode)
+              (equal (file-name-as-directory
+                      (expand-file-name default-directory))
+                     target))))
+     (buffer-list))))
+
 (defun repo-dashboard--call-vc-command (record command fallback &optional prefix)
-  "Call VC COMMAND from a `vc-dir' buffer for RECORD.
-Use FALLBACK when COMMAND is unavailable.  PREFIX is passed through as
-`current-prefix-arg'."
-  (if (fboundp command)
-      (let ((current-prefix-arg prefix))
-        (vc-dir (repo-dashboard--record-directory record))
-        (unless (derived-mode-p 'vc-dir-mode)
-          (user-error "Could not open vc-dir for %s"
-                      (plist-get record :display-path)))
-        (call-interactively command)
-        'vc)
-    (funcall fallback record)
-    'fallback))
+  "Call VC COMMAND for RECORD via an existing `vc-dir' buffer.
+If no `vc-dir' buffer exists for the repository, call FALLBACK instead.
+PREFIX is passed through as `current-prefix-arg'."
+  (let ((dir (repo-dashboard--record-directory record)))
+    (if-let* (((fboundp command))
+              (vc-buf (repo-dashboard--find-vc-dir-buffer dir)))
+        (let ((current-prefix-arg prefix))
+          (pop-to-buffer vc-buf)
+          (call-interactively command)
+          'vc)
+      (funcall fallback record)
+      'fallback)))
 
 (defun repo-dashboard--fallback-pull (record)
   "Fallback pull implementation for RECORD."
@@ -1193,29 +1215,36 @@ Use FALLBACK when COMMAND is unavailable.  PREFIX is passed through as
   (repo-dashboard--display-git-command record "*Repo Dashboard Push*"
                                        "push"))
 
+(defun repo-dashboard--rescan-record (record dashboard)
+  "Rescan RECORD and update DASHBOARD buffer."
+  (let* ((key (repo-dashboard--scan-key record))
+         (new-record (repo-dashboard--scan record)))
+    (when (buffer-live-p dashboard)
+      (with-current-buffer dashboard
+        (repo-dashboard--replace-record key new-record)
+        (repo-dashboard--render)))))
+
 (defun repo-dashboard-pull (&optional prefix)
   "Run `vc-pull' in the repository at point.
 PREFIX is forwarded to `vc-pull'."
   (interactive "P")
-  (pcase (repo-dashboard--call-vc-command
-          (repo-dashboard--require-record)
-          'vc-pull
-          #'repo-dashboard--fallback-pull
-          prefix)
-    ('vc (message "VC pull started from vc-dir; press g in repo-dashboard after it finishes to refresh"))
-    ('fallback (repo-dashboard-refresh))))
+  (let ((record (repo-dashboard--require-record))
+        (dashboard (current-buffer)))
+    (pcase (repo-dashboard--call-vc-command
+            record 'vc-pull #'repo-dashboard--fallback-pull prefix)
+      ('vc (message "VC pull started; press . to rescan"))
+      ('fallback (repo-dashboard--rescan-record record dashboard)))))
 
 (defun repo-dashboard-push (&optional prefix)
   "Run `vc-push' in the repository at point.
 PREFIX is forwarded to `vc-push'."
   (interactive "P")
-  (pcase (repo-dashboard--call-vc-command
-          (repo-dashboard--require-record)
-          'vc-push
-          #'repo-dashboard--fallback-push
-          prefix)
-    ('vc (message "VC push started from vc-dir; press g in repo-dashboard after it finishes to refresh"))
-    ('fallback (repo-dashboard-refresh))))
+  (let ((record (repo-dashboard--require-record))
+        (dashboard (current-buffer)))
+    (pcase (repo-dashboard--call-vc-command
+            record 'vc-push #'repo-dashboard--fallback-push prefix)
+      ('vc (message "VC push started; press . to rescan"))
+      ('fallback (repo-dashboard--rescan-record record dashboard)))))
 
 (defun repo-dashboard--insert-git-output (dir args)
   "Insert Git output from DIR using ARGS at point.
@@ -1524,6 +1553,7 @@ output lines with the repository name."
     (define-key map (kbd "n") #'repo-dashboard-next-line)
     (define-key map (kbd "p") #'repo-dashboard-previous-line)
     (define-key map (kbd "g") #'repo-dashboard-refresh)
+    (define-key map (kbd ".") #'repo-dashboard-refresh-at-point)
     (define-key map (kbd "RET") #'repo-dashboard-vc-dir)
     (define-key map (kbd "j") #'repo-dashboard-dired)
     (define-key map (kbd "C-x g") #'repo-dashboard-magit-status)

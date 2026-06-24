@@ -2,9 +2,7 @@
 #+author: Paul Nelson
 
 =repo-dashboard= is a small Emacs package for managing a personal collection of
-Git repositories from one buffer.  It is meant to sit between a shell script
-such as =install --doctor= and heavier per-repository tools such as =vc-dir= or
-Magit.
+Git repositories from one buffer.
 
 The main command is =M-x repo-dashboard=.  It reads one or more manifest files,
 starts asynchronous Git-state scans for each repository, and displays a
@@ -13,39 +11,27 @@ remote-mismatch information as rows finish.
 
 * Manifest format
 
-The default manifest is =~/dotfiles/repos.manifest=.  Each non-comment line
-begins with a path and origin URL:
+Customize =repo-dashboard-manifest-files= to specify your manifest files, e.g.:
+#+begin_src elisp
+(setopt repo-dashboard-manifest-files ("~/dotfiles/repos.manifest"))
+#+end_src
 
+Each non-comment line of each manifest file should begin with a path and origin URL.  Blank lines and lines starting with =#= are ignored.  A third field may specify an extra remote as =NAME=URL=.  Extra fields are ignored.  Example:
 #+begin_example
 ~/work/example git@github.com:user/example.git
 ~/work/fork git@github.com:user/fork.git upstream=https://github.com/upstream/fork.git
 #+end_example
 
-Blank lines and lines starting with =#= are ignored.  A third field may specify
-an extra remote as =NAME=URL=.  Extra fields are ignored, matching the simple
-manifest style used by shell setup scripts.
-
-When an origin or extra remote is present, =repo-dashboard= checks that the
-local remote URL matches.  SSH, HTTPS, and =.git= suffix differences are
-normalized before comparison.
-
-Customize =repo-dashboard-manifest-files= to read different manifests.
 
 * Usage
-
-#+begin_src emacs-lisp
-(use-package repo-dashboard
-  :load-path "~/work/repo-dashboard"
-  :bind (("C-c r" . repo-dashboard)))
-#+end_src
 
 In the dashboard:
 
 | Key   | Command |
 |-------+---------|
 | =n=, =p= | Move to next/previous repository |
-| =g= | Refresh repository state asynchronously |
-| =C-u g= | Refresh repository state synchronously |
+| =g= | Refresh all repository state |
+| =.= | Rescan the repository at point, or all marked repos |
 | =RET= | Open =vc-dir= for the repository |
 | =j= | Open Dired at the repository root |
 | =C-x g= | Open Magit status for the repository, when Magit is available |
@@ -62,27 +48,13 @@ In the dashboard:
 | =&= | Run an async shell command in marked repos, or the current repo |
 | =?= | Describe the dashboard mode and bindings |
 
-The individual pull and push commands are wrappers around VC, but they run from
-a real =vc-dir= buffer for the repository.  This matches the context required
-by =vc-pull= and =vc-push=.  Prefix arguments are passed along, so =C-u += and
-=C-u P= behave like prefix calls to those VC commands.  VC commands may run
-asynchronously; press =g= when they finish to refresh the dashboard.
+Prefix arguments are passed along, so =C-u += and =C-u P= behave like prefix calls to those VC commands.  VC commands may run asynchronously; press =g= when they finish to refresh the dashboard.
 
-The default safe bulk action is intentionally narrow: =git pull --ff-only= on a
-clean current branch whose upstream is behind and not ahead.  It does not push,
-delete branches, merge divergent branches, or touch dirty working trees.
+The default safe bulk action is intentionally narrow: =git pull --ff-only= on a clean current branch whose upstream is behind and not ahead.  It does not push, delete branches, merge divergent branches, or touch dirty working trees.
 
 * Async refresh
 
-Dashboard refreshes are asynchronous by default.  A refresh renders
-=scanning= placeholder rows immediately, then fills in each row as a background
-Emacs subprocess completes the existing synchronous repository scanner.  This
-keeps large manifests and package roots responsive while preserving the same
-Git-state interpretation as the synchronous path.
-
-Customize =repo-dashboard-refresh-concurrency= to control how many scan
-subprocesses run at once.  Set =repo-dashboard-async-refresh= to nil, or press
-=C-u g= in the dashboard, to force the old blocking refresh behavior.
+Customize =repo-dashboard-refresh-concurrency= to control how many scan subprocesses run at once.
 
 * Mark helpers
 
@@ -96,22 +68,6 @@ The =*= prefix marks repositories by state:
 | =* b= | Repos with any local branch behind an upstream |
 | =* a= | Repos with any local branch ahead of an upstream |
 | =* s= | Repos with stale non-current local branches |
-
-* Stale deploy branches
-
-=repo-dashboard= treats local branches named =deploy= as ordinary local
-branches, but it makes common generated-branch states visible:
-
-- =stale deploy=: local =deploy= has no unique commits and is behind
-  =origin/deploy=.
-- =deploy diverged=: local =deploy= and =origin/deploy= both have unique
-  commits.
-
-Remote-only deploy branches, such as a repository with =main= plus
-=origin/deploy= but no local =deploy=, do not count as a problem.
-
-The package does not delete or reset these branches automatically.  Use =RET= to
-enter =vc-dir=, or =C-x g= for Magit, when you want to perform branch surgery.
 
 * Emacs package repositories
 
@@ -139,15 +95,3 @@ Large package roots can contain hundreds of Git repositories.  Keep this source
 opt-in if you mostly want the fast manifest view, and lower
 =repo-dashboard-refresh-concurrency= if scanning too many packages at once is
 too noisy for your machine.
-
-* Notes
-
-This package deliberately stays close to built-in VC:
-
-- =RET= goes to =vc-dir= rather than Magit.
-- =+= and =P= call =vc-pull= and =vc-push= when those functions are available.
-- =C-x g= is a local convenience binding for Magit users.
-
-The goal is not to replace per-repository tools.  It is to make it easy to see
-which repositories need attention, mark a subset, and perform conservative
-bulk actions without leaving Emacs.

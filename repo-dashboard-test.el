@@ -92,22 +92,6 @@
                                             :current t)))))
     (should (repo-dashboard--safe-push-p record))))
 
-(ert-deftest repo-dashboard-state-stale-deploy ()
-  (let* ((record (list :kind 'git
-                       :dirty 0
-                       :unpushed 0
-                       :branches (list (list :branch "main"
-                                             :upstream "origin/main"
-                                             :ahead 0
-                                             :behind 0
-                                             :current t)
-                                       (list :branch "deploy"
-                                             :upstream "origin/deploy"
-                                             :ahead 0
-                                             :behind 10
-                                             :current nil)))))
-    (should (equal (repo-dashboard--record-state record) "stale deploy"))))
-
 (ert-deftest repo-dashboard-record-state-branches ()
   (should (equal (repo-dashboard--record-state
                   (list :kind 'git
@@ -145,19 +129,6 @@
                                               :behind 0
                                               :current t))))
                  "pushable"))
-  (should (equal (repo-dashboard--record-state
-                  (list :kind 'git
-                        :dirty 0
-                        :unpushed 0
-                        :branches (list (list :branch "main"
-                                              :ahead 0
-                                              :behind 0
-                                              :current t)
-                                        (list :branch "deploy"
-                                              :ahead 1
-                                              :behind 1
-                                              :current nil))))
-                 "deploy diverged"))
   (should (equal (repo-dashboard--record-state
                   (list :kind 'git
                         :dirty 0
@@ -232,8 +203,7 @@
                         (list (lambda ()
                                 (list (repo-dashboard--descriptor
                                        dir :group "test")))))
-            (let ((repo-dashboard-async-refresh t)
-                  (repo-dashboard-refresh-concurrency 1))
+            (let ((repo-dashboard-refresh-concurrency 1))
               (repo-dashboard-refresh)
               (should (= (length repo-dashboard--records) 1))
               (should (eq (plist-get (car repo-dashboard--records) :kind)
@@ -247,30 +217,34 @@
       (delete-directory dir t))))
 
 (ert-deftest repo-dashboard-call-vc-command-uses-vc-dir-buffer ()
-  (let ((record (list :path default-directory
-                      :display-path default-directory))
-        seen)
-    (cl-letf (((symbol-function 'vc-dir)
-               (lambda (dir)
-                 (switch-to-buffer
-                  (get-buffer-create " *repo-dashboard-test-vc-dir*"))
-                 (setq default-directory dir)
-                 (setq major-mode 'vc-dir-mode)))
-              ((symbol-function 'repo-dashboard-test--vc-command)
-               (lambda (&optional _arg)
-                 (interactive "P")
-                 (setq seen
-                       (list :buffer (current-buffer)
-                             :vc-dir-p (derived-mode-p 'vc-dir-mode)
-                             :prefix current-prefix-arg
-                             :directory default-directory)))))
-      (should (eq (repo-dashboard--call-vc-command
-                   record 'repo-dashboard-test--vc-command #'ignore '(4))
-                  'vc))
-      (should (plist-get seen :vc-dir-p))
-      (should (equal (plist-get seen :prefix) '(4)))
-      (should (equal (file-name-as-directory (plist-get seen :directory))
-                     (file-name-as-directory default-directory))))))
+  (let* ((record (list :path default-directory
+                       :display-path default-directory))
+         (vc-buf (get-buffer-create " *repo-dashboard-test-vc-dir*"))
+         seen)
+    (unwind-protect
+        (progn
+          ;; Pre-create a vc-dir-mode buffer so --find-vc-dir-buffer finds it.
+          (with-current-buffer vc-buf
+            (setq default-directory (file-name-as-directory
+                                     (expand-file-name default-directory)))
+            (setq major-mode 'vc-dir-mode))
+          (cl-letf (((symbol-function 'repo-dashboard-test--vc-command)
+                     (lambda (&optional _arg)
+                       (interactive "P")
+                       (setq seen
+                             (list :buffer (current-buffer)
+                                   :vc-dir-p (derived-mode-p 'vc-dir-mode)
+                                   :prefix current-prefix-arg
+                                   :directory default-directory)))))
+            (should (eq (repo-dashboard--call-vc-command
+                         record 'repo-dashboard-test--vc-command #'ignore '(4))
+                        'vc))
+            (should (plist-get seen :vc-dir-p))
+            (should (equal (plist-get seen :prefix) '(4)))
+            (should (equal (file-name-as-directory (plist-get seen :directory))
+                           (file-name-as-directory
+                            (expand-file-name default-directory))))))
+      (kill-buffer vc-buf))))
 
 (provide 'repo-dashboard-test)
 
