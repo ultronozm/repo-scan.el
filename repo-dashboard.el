@@ -127,6 +127,11 @@ Enable this by adding `repo-dashboard-source-emacs-package-roots' to
   :type 'string
   :group 'repo-dashboard)
 
+(defcustom repo-dashboard-info-buffer-name "*Repo Dashboard Info*"
+  "Buffer used for `repo-dashboard-info'."
+  :type 'string
+  :group 'repo-dashboard)
+
 (defface repo-dashboard-ok-face
   '((t :inherit success))
   "Face used for clean repositories."
@@ -483,6 +488,29 @@ Return nil for comments and blank lines."
   (repo-dashboard--count-lines
    (repo-dashboard--git-string dir "log" "--branches" "--not" "--remotes" "--oneline")))
 
+(defun repo-dashboard--unpushed-branch-count (dir branch)
+  "Return count of commits on BRANCH in DIR but on no remote."
+  (string-to-number
+   (or (repo-dashboard--git-string
+        dir "rev-list" "--count" branch "--not" "--remotes")
+       "0")))
+
+(defun repo-dashboard--unpushed-branches (dir current-branch)
+  "Return local branches in DIR with commits not on any remote."
+  (let (branches)
+    (dolist (line (repo-dashboard--local-branch-lines dir))
+      (pcase-let* ((`(,branch ,upstream) (split-string line "\t"))
+                   (count (repo-dashboard--unpushed-branch-count dir branch)))
+        (when (> count 0)
+          (push (list :branch branch
+                      :upstream (and upstream
+                                     (not (string-empty-p upstream))
+                                     upstream)
+                      :count count
+                      :current (equal branch current-branch))
+                branches))))
+    (nreverse branches)))
+
 (defun repo-dashboard--ahead-behind (dir branch upstream)
   "Return cons cell (AHEAD . BEHIND) for BRANCH and UPSTREAM in DIR."
   (when-let* ((counts (repo-dashboard--git-string
@@ -609,7 +637,7 @@ CURRENT-BRANCH is used to mark the current row."
         ((> current-ahead 0)
          "pushable")
         ((> unpushed 0)
-         "unpushed")
+         "local-only")
         (branches "branch drift")
         (t "ok"))))
     (_ "unknown")))
@@ -635,6 +663,7 @@ CURRENT-BRANCH is used to mark the current row."
                                    :branch ""
                                    :dirty 0
                                    :unpushed 0
+                                   :unpushed-branches nil
                                    :ahead 0
                                    :behind 0
                                    :branches nil))
@@ -645,12 +674,15 @@ CURRENT-BRANCH is used to mark the current row."
                                    :branch ""
                                    :dirty 0
                                    :unpushed 0
+                                   :unpushed-branches nil
                                    :ahead 0
                                    :behind 0
                                    :branches nil))
      (t
       (let* ((branch (repo-dashboard--current-branch root))
              (branches (repo-dashboard--branch-statuses root branch))
+             (unpushed-branches
+              (repo-dashboard--unpushed-branches root branch))
              (record (repo-dashboard--plist-merge
                       base
                       :kind 'git
@@ -664,6 +696,7 @@ CURRENT-BRANCH is used to mark the current row."
                       (repo-dashboard--remote-problems root descriptor)
                       :dirty (repo-dashboard--dirty-count root)
                       :unpushed (repo-dashboard--unpushed-count root)
+                      :unpushed-branches unpushed-branches
                       :branches branches)))
         (setq record (plist-put record :ahead
                                 (repo-dashboard--record-ahead record)))
@@ -713,19 +746,56 @@ CURRENT-BRANCH is used to mark the current row."
             (when (> behind 0)
               (format " -%d" behind)))))
 
-(defun repo-dashboard--branches-text (record)
-  "Return compact branch and remote detail text for RECORD."
-  (let* ((remote-problems (plist-get record :remote-problems))
-         (branches (repo-dashboard--problem-branches record))
+(defun repo-dashboard--commit-word (count)
+  "Return a short commit count string for COUNT."
+  (format "%d commit%s" count (if (= count 1) "" "s")))
+
+(defun repo-dashboard--status-line-word (count)
+  "Return a short status-line count string for COUNT."
+  (format "%d status line%s" count (if (= count 1) "" "s")))
+
+(defun repo-dashboard--local-only-branch-string (status)
+  "Return compact local-only text for branch STATUS."
+  (format "%s +%d"
+          (plist-get status :branch)
+          (plist-get status :count)))
+
+(defun repo-dashboard--local-only-text (record)
+  "Return compact local-only branch detail text for RECORD."
+  (let* ((branches (plist-get record :unpushed-branches))
          (shown (seq-take branches 2))
-         (parts (append remote-problems
-                        (plist-get record :siblings)
-                        (mapcar #'repo-dashboard--branch-drift-string shown))))
+         (parts (mapcar #'repo-dashboard--local-only-branch-string shown))
+         (total (or (plist-get record :unpushed) 0)))
     (when (> (length branches) (length shown))
       (setq parts (append parts (list (format "+%d more"
                                               (- (length branches)
                                                  (length shown)))))))
-    (string-join parts ", ")))
+    (cond
+     (parts
+      (concat "local-only: " (string-join parts ", ")))
+     ((> total 0)
+      (format "local-only: %s" (repo-dashboard--commit-word total))))))
+
+(defun repo-dashboard--drift-text (record)
+  "Return compact branch drift detail text for RECORD."
+  (let* ((branches (repo-dashboard--problem-branches record))
+         (shown (seq-take branches 2))
+         (parts (mapcar #'repo-dashboard--branch-drift-string shown)))
+    (when (> (length branches) (length shown))
+      (setq parts (append parts (list (format "+%d more"
+                                              (- (length branches)
+                                                 (length shown)))))))
+    (when parts
+      (concat "drift: " (string-join parts ", ")))))
+
+(defun repo-dashboard--branches-text (record)
+  "Return compact branch and remote detail text for RECORD."
+  (let ((parts (append (plist-get record :remote-problems)
+                       (plist-get record :siblings)
+                       (delq nil
+                             (list (repo-dashboard--local-only-text record)
+                                   (repo-dashboard--drift-text record))))))
+    (string-join parts "; ")))
 
 (defun repo-dashboard--entry (record)
   "Return tabulated list entry for RECORD."
@@ -763,7 +833,7 @@ CURRENT-BRANCH is used to mark the current row."
     ("pushable" 7)
     ("wip push" 7)
     ("branch drift" 8)
-    ("unpushed" 9)
+    ("local-only" 9)
     ("scanning" 98)
     ("expected" 97)
     ("ok" 99)
@@ -789,6 +859,7 @@ CURRENT-BRANCH is used to mark the current row."
         (remote-problems 0)
         (pullable 0)
         (pushable 0)
+        (local-only 0)
         (drift 0)
         (scanning 0)
         (errors 0))
@@ -806,16 +877,18 @@ CURRENT-BRANCH is used to mark the current row."
            (setq pullable (1+ pullable)))
          (when (repo-dashboard--safe-push-p record)
            (setq pushable (1+ pushable)))
+         (when (> (plist-get record :unpushed) 0)
+           (setq local-only (1+ local-only)))
          (when (repo-dashboard--problem-branches record)
            (setq drift (1+ drift))))))
     (concat
      (format
-      "Repos:%d%s%s  Missing:%d  Remote:%d  Dirty:%d  Pullable:%d  Pushable:%d  Drift:%d"
+      "Repos:%d%s%s  Missing:%d  Remote:%d  Dirty:%d  Pullable:%d  Pushable:%d  Local-only:%d  Drift:%d"
       (length records)
       (if (> scanning 0) (format "  Scanning:%d" scanning) "")
       (if (> errors 0) (format "  Errors:%d" errors) "")
-      missing remote-problems dirty pullable pushable drift)
-     "   RET:vc-dir  j:dired  =:diff  .:rescan  +:pull  P:push  x/X:safe pull  ?:help")))
+      missing remote-problems dirty pullable pushable local-only drift)
+     "   RET:vc-dir  i:info  j:dired  =:diff  .:rescan  +:pull  P:push  x/X:safe pull  ?:help")))
 
 (defun repo-dashboard--current-position-state (&optional position)
   "Return row state at POSITION, or point when POSITION is nil."
@@ -1354,6 +1427,53 @@ Return the process exit status."
     (message "Fetch started for %d repo(s); press g after it finishes to refresh"
              (length records))))
 
+(defun repo-dashboard--choose-local-only-branch (record prompt)
+  "Choose a local-only branch from RECORD using PROMPT."
+  (let* ((branches (plist-get record :unpushed-branches))
+         (default (car branches)))
+    (cond
+     ((null branches) nil)
+     ((= (length branches) 1) default)
+     (t
+      (let* ((candidates
+              (mapcar (lambda (branch)
+                        (cons (format "%s (%s)"
+                                      (plist-get branch :branch)
+                                      (repo-dashboard--commit-word
+                                       (plist-get branch :count)))
+                              branch))
+                      branches))
+             (choice (completing-read prompt candidates nil t
+                                      nil nil
+                                      (caar candidates))))
+        (cdr (assoc choice candidates)))))))
+
+(defun repo-dashboard--local-only-primary-p (record)
+  "Return non-nil when local-only commits are RECORD's main problem."
+  (and (> (or (plist-get record :unpushed) 0) 0)
+       (or (string= (plist-get record :state) "local-only")
+           (not (repo-dashboard--problem-branches record)))))
+
+(defun repo-dashboard--insert-local-only-log (record branch &optional patch)
+  "Insert local-only commit log for RECORD and BRANCH.
+When PATCH is non-nil, include patches."
+  (let* ((dir (repo-dashboard--record-directory record))
+         (branch-name (plist-get branch :branch))
+         (branch-arg (or branch-name "--branches"))
+         (count (or (plist-get branch :count)
+                    (plist-get record :unpushed))))
+    (insert (format "%s local-only %s\n\n"
+                    (or branch-name "all branches")
+                    (repo-dashboard--commit-word count)))
+    (insert
+     "These commits are reachable from a local branch but from no remote-tracking ref.\n\n")
+    (repo-dashboard--insert-git-output
+     dir
+     (append (list "log" "--decorate" "--oneline")
+             (unless patch '("--graph"))
+             (when patch '("--stat" "--patch"))
+             (list branch-arg "--not" "--remotes")))))
+
 (defun repo-dashboard--choose-branch-status (record prompt)
   "Choose a branch status from RECORD using PROMPT."
   (let* ((statuses (repo-dashboard--problem-branches record))
@@ -1380,6 +1500,135 @@ Return the process exit status."
                                       nil nil
                                       (car (rassoc default candidates)))))
         (cdr (assoc choice candidates)))))))
+
+(defun repo-dashboard--status-for-branch (record branch)
+  "Return branch drift status from RECORD for BRANCH, or nil."
+  (seq-find (lambda (status)
+              (equal branch (plist-get status :branch)))
+            (plist-get record :branches)))
+
+(defun repo-dashboard--branch-advice (status)
+  "Return short next-step advice for branch drift STATUS."
+  (let ((ahead (plist-get status :ahead))
+        (behind (plist-get status :behind))
+        (current (plist-get status :current)))
+    (cond
+     ((and current (= ahead 0) (> behind 0))
+      "Next: press x or + to fast-forward pull if the worktree is clean.")
+     ((and current (> ahead 0) (= behind 0))
+      "Next: press P to push the current branch.")
+     ((and (> ahead 0) (> behind 0))
+      "Next: inspect the log/diff, then rebase, merge, push, or delete the stale local branch manually.")
+     ((> behind 0)
+      "Next: if this branch is still useful, check it out and update it; otherwise delete the local branch.")
+     ((> ahead 0)
+      "Next: push or merge it if the commit matters; otherwise delete the local branch.")
+     (t "Next: no action needed for this branch."))))
+
+(defun repo-dashboard--insert-local-only-info (record)
+  "Insert local-only commit details for RECORD."
+  (let ((branches (plist-get record :unpushed-branches))
+        (total (or (plist-get record :unpushed) 0)))
+    (when (> total 0)
+      (insert "Local-only commits\n")
+      (insert
+       "Meaning: commits reachable from local branches but from no remote-tracking ref.\n")
+      (insert "Reproduce: git log --branches --not --remotes --oneline --decorate\n")
+      (insert "Inspect: press l here, or run the command above in the repo.\n")
+      (insert
+       "Resolve: push/merge/cherry-pick commits you still need, or delete obsolete local/backup branches.\n\n")
+      (if branches
+          (dolist (branch branches)
+            (let* ((name (plist-get branch :branch))
+                   (status (repo-dashboard--status-for-branch record name))
+                   (upstream (or (plist-get branch :upstream)
+                                 (and status
+                                      (plist-get status :upstream)))))
+              (insert (format "- %s: %s"
+                              name
+                              (repo-dashboard--commit-word
+                               (plist-get branch :count))))
+              (when upstream
+                (insert (format ", upstream %s" upstream)))
+              (when status
+                (insert (format ", drift +%d/-%d"
+                                (plist-get status :ahead)
+                                (plist-get status :behind))))
+              (insert "\n")))
+        (insert (format "- %s across local branches\n"
+                        (repo-dashboard--commit-word total))))
+      (insert "\n"))))
+
+(defun repo-dashboard--insert-drift-info (record)
+  "Insert branch drift details for RECORD."
+  (let ((branches (repo-dashboard--problem-branches record)))
+    (when branches
+      (insert "Branch drift\n")
+      (insert
+       "Meaning: local branches differ from their configured or same-named remote branch.\n")
+      (dolist (status branches)
+        (let ((branch (plist-get status :branch))
+              (upstream (plist-get status :upstream))
+              (ahead (plist-get status :ahead))
+              (behind (plist-get status :behind)))
+          (insert (format "- %s -> %s: +%d/-%d%s\n"
+                          branch upstream ahead behind
+                          (if (plist-get status :current)
+                              " (current)"
+                            "")))
+          (insert (format "  Inspect: git log --left-right --graph --decorate --oneline %s...%s\n"
+                          branch upstream))
+          (insert "  " (repo-dashboard--branch-advice status) "\n")))
+      (insert "\n"))))
+
+(defun repo-dashboard-info ()
+  "Explain the repository state at point and useful next steps."
+  (interactive)
+  (let* ((record (repo-dashboard--require-record))
+         (buffer (get-buffer-create repo-dashboard-info-buffer-name))
+         (kind (plist-get record :kind))
+         (dirty (or (plist-get record :dirty) 0))
+         (remote-problems (plist-get record :remote-problems))
+         (current (repo-dashboard--current-branch-status record)))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "%s\n%s\nState: %s\n\n"
+                        (plist-get record :name)
+                        (plist-get record :display-path)
+                        (plist-get record :state)))
+        (pcase kind
+          ('missing
+           (insert "The manifest path does not exist.\n"))
+          ('non-git
+           (insert "The path exists, but it is not inside a Git repository.\n"))
+          ('git
+           (when remote-problems
+             (insert "Remote problems\n")
+             (dolist (problem remote-problems)
+               (insert "- " problem "\n"))
+             (insert "\n"))
+           (when (> dirty 0)
+             (insert (format "Working tree\n- %s from git status --porcelain\n"
+                             (repo-dashboard--status-line-word dirty)))
+             (insert "Inspect: press = here, or run git status --short.\n\n"))
+           (when current
+             (insert (format "Current branch\n- %s -> %s: +%d/-%d\n\n"
+                             (plist-get current :branch)
+                             (plist-get current :upstream)
+                             (plist-get current :ahead)
+                             (plist-get current :behind))))
+           (repo-dashboard--insert-local-only-info record)
+           (repo-dashboard--insert-drift-info record)
+           (when (and (= dirty 0)
+                      (not remote-problems)
+                      (= (or (plist-get record :unpushed) 0) 0)
+                      (not (repo-dashboard--problem-branches record)))
+             (insert "No dashboard problems are recorded for this repository.\n")))
+          (_
+           (insert "No additional information is available for this row.\n")))
+        (special-mode)))
+    (pop-to-buffer buffer)))
 
 (defun repo-dashboard--insert-branch-diff (record status)
   "Insert diff for branch STATUS in RECORD."
@@ -1426,12 +1675,18 @@ Return the process exit status."
           (repo-dashboard--insert-git-output dir (list "status" "--short"))
           (insert "\n")
           (repo-dashboard--insert-git-output dir (list "diff" "HEAD" "--")))
+         ((repo-dashboard--local-only-primary-p record)
+          (repo-dashboard--insert-local-only-log
+           record
+           (repo-dashboard--choose-local-only-branch
+            record "Local-only branch: ")
+           t))
          ((repo-dashboard--problem-branches record)
           (repo-dashboard--insert-branch-diff
            record
            (repo-dashboard--choose-branch-status record "Diff branch: ")))
          (t
-          (insert "No dirty files or branch drift.\n")))
+          (insert "No dirty files, local-only commits, or branch drift.\n")))
         (diff-mode)))
     (pop-to-buffer buffer)))
 
@@ -1440,7 +1695,11 @@ Return the process exit status."
   (interactive)
   (let* ((record (repo-dashboard--require-record))
          (dir (repo-dashboard--record-directory record))
-         (status (repo-dashboard--choose-branch-status record "Log branch: "))
+         (local-only (and (repo-dashboard--local-only-primary-p record)
+                          (repo-dashboard--choose-local-only-branch
+                           record "Local-only branch: ")))
+         (status (unless local-only
+                   (repo-dashboard--choose-branch-status record "Log branch: ")))
          (branch (or (plist-get status :branch)
                      (and (repo-dashboard--current-branch-status record)
                           (plist-get (repo-dashboard--current-branch-status record)
@@ -1454,13 +1713,17 @@ Return the process exit status."
         (insert (format "%s\n%s\n\n"
                         (plist-get record :name)
                         (plist-get record :display-path)))
-        (if upstream
-            (repo-dashboard--insert-git-output
-             dir (list "log" "--left-right" "--graph" "--decorate" "--oneline"
-                       (format "%s...%s" branch upstream)))
+        (cond
+         (local-only
+          (repo-dashboard--insert-local-only-log record local-only))
+         (upstream
+          (repo-dashboard--insert-git-output
+           dir (list "log" "--left-right" "--graph" "--decorate" "--oneline"
+                     (format "%s...%s" branch upstream))))
+         (t
           (repo-dashboard--insert-git-output
            dir (list "log" "--graph" "--decorate" "--oneline" "-n" "80"
-                     branch)))
+                     branch))))
         (special-mode)))
     (pop-to-buffer buffer)))
 
@@ -1857,6 +2120,7 @@ output lines with the repository name."
     (define-key map (kbd "g") #'repo-dashboard-refresh)
     (define-key map (kbd ".") #'repo-dashboard-refresh-at-point)
     (define-key map (kbd "RET") #'repo-dashboard-vc-dir)
+    (define-key map (kbd "i") #'repo-dashboard-info)
     (define-key map (kbd "j") #'repo-dashboard-dired)
     (define-key map (kbd "C-x g") #'repo-dashboard-magit-status)
     (define-key map (kbd "=") #'repo-dashboard-diff)

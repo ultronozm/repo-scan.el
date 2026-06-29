@@ -164,7 +164,7 @@
                         :dirty 0
                         :unpushed 2
                         :branches nil))
-                 "unpushed"))
+                 "local-only"))
   (should (equal (repo-dashboard--record-state
                   (list :kind 'git
                         :dirty 0
@@ -190,7 +190,18 @@
                                             :ahead 0
                                             :behind 3)))))
     (should (equal (repo-dashboard--branches-text record)
-                   "a +1, b -2, +1 more"))))
+                   "drift: a +1, b -2, +1 more"))))
+
+(ert-deftest repo-dashboard-branches-text-prioritizes-local-only ()
+  (let ((record (list :unpushed 2
+                      :unpushed-branches
+                      (list (list :branch "topic-a" :count 1)
+                            (list :branch "topic-b" :count 1))
+                      :branches (list (list :branch "old"
+                                            :ahead 0
+                                            :behind 2)))))
+    (should (equal (repo-dashboard--branches-text record)
+                   "local-only: topic-a +1, topic-b +1; drift: old -2"))))
 
 (ert-deftest repo-dashboard-remote-problems ()
   (let ((dir (make-temp-file "repo-dashboard-test" t)))
