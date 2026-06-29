@@ -814,9 +814,9 @@ CURRENT-BRANCH is used to mark the current row."
            (repo-dashboard--format-count (plist-get record :ahead))
            (repo-dashboard--format-count (plist-get record :behind))
            state
-           (repo-dashboard--branches-text record)
            (propertize (plist-get record :display-path)
-                       'face 'repo-dashboard-muted-face)))))
+                       'face 'repo-dashboard-muted-face)
+           (repo-dashboard--branches-text record)))))
 
 (defun repo-dashboard--state-rank (record)
   "Return sort rank for RECORD."
@@ -2156,8 +2156,8 @@ output lines with the repository name."
          ("A" 4 tabulated-list-entry-size->)
          ("B" 4 tabulated-list-entry-size->)
          ("State" 16 t)
-         ("Details" 30 t)
-         ("Path" 0 t)])
+         ("Path" 30 t)
+         ("Details" 0 t)])
   (setq tabulated-list-padding 2)
   (setq tabulated-list-sort-key nil)
   (add-hook 'tabulated-list-revert-hook #'repo-dashboard-refresh nil t)

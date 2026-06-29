@@ -203,6 +203,14 @@
     (should (equal (repo-dashboard--branches-text record)
                    "local-only: topic-a +1, topic-b +1; drift: old -2"))))
 
+(ert-deftest repo-dashboard-details-column-expands ()
+  (with-temp-buffer
+    (repo-dashboard-mode)
+    (let ((last-column (aref tabulated-list-format
+                             (1- (length tabulated-list-format)))))
+      (should (equal (nth 0 last-column) "Details"))
+      (should (= (nth 1 last-column) 0)))))
+
 (ert-deftest repo-dashboard-remote-problems ()
   (let ((dir (make-temp-file "repo-dashboard-test" t)))
     (unwind-protect
