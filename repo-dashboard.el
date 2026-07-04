@@ -1490,6 +1490,29 @@ Called with the repository record."
   :type 'string
   :group 'repo-dashboard)
 
+(defcustom repo-dashboard-wrap-up-wip-namespace 'system-name
+  "Namespace for branches pushed by wip-policy wrap-up.
+When non-nil, a wip-policy wrap-up pushes branch BRANCH to
+NAMESPACE/BRANCH on the wip remote instead of BRANCH, so that machines
+sharing a remote never write to each other's refs and the forced push
+can only overwrite this machine's own previous snapshot.  The value is
+a string, or the symbol `system-name' to use a sanitized `system-name'.
+Set to nil to push to the unqualified branch name (only safe when a
+single machine pushes to the remote)."
+  :type '(choice (const :tag "Machine name" system-name)
+                 (string :tag "Fixed namespace")
+                 (const :tag "None (single machine only)" nil))
+  :group 'repo-dashboard)
+
+(defun repo-dashboard--wrap-up-wip-namespace ()
+  "Return the effective wip namespace string, or nil."
+  (pcase repo-dashboard-wrap-up-wip-namespace
+    ('system-name
+     (let ((name (downcase (car (split-string (system-name) "\\.")))))
+       (replace-regexp-in-string "[^a-z0-9-]" "-" name)))
+    ((and (pred stringp) name) name)
+    (_ nil)))
+
 (defun repo-dashboard-wrap-up-default-snapshot-message (_record)
   "Return the default wrap-up snapshot commit message."
   (format-time-string "; wip snapshot %F %R"))
@@ -1549,10 +1572,14 @@ Return a result string, or nil when the commit failed."
 
 (defun repo-dashboard--wrap-up-wip-item (record remote note)
   "Return the wrap-up item for wip-policy RECORD pushing to REMOTE.
-NOTE describes a snapshot commit made beforehand, if any."
+NOTE describes a snapshot commit made beforehand, if any.  The target
+branch is namespaced per `repo-dashboard-wrap-up-wip-namespace', so
+that the forced push can only overwrite this machine's own snapshots."
   (let* ((dir (plist-get record :path))
          (branch (plist-get record :branch))
-         (remote-ref (format "%s/%s" remote branch))
+         (namespace (repo-dashboard--wrap-up-wip-namespace))
+         (target (if namespace (format "%s/%s" namespace branch) branch))
+         (remote-ref (format "%s/%s" remote target))
          (has-remote-branch
           (repo-dashboard--git-success-p dir "rev-parse" "--verify"
                                          "--quiet" remote-ref))
@@ -1562,19 +1589,22 @@ NOTE describes a snapshot commit made beforehand, if any."
     (if (or (not has-remote-branch) (> (or ahead 0) 0))
         (repo-dashboard--wrap-up-item
          record 'push
-         (format "push %s to %s%s%s"
-                 branch remote
+         (format "push %s to %s/%s%s%s"
+                 branch remote target
                  (if has-remote-branch
                      (format " (%d commit%s)" ahead (if (= ahead 1) "" "s"))
                    " (new branch)")
                  (if note (concat "; " note) ""))
-         :args (list "push" "--force-with-lease" remote branch)
+         :args (list "push"
+                     (format "--force-with-lease=refs/heads/%s" target)
+                     remote
+                     (format "%s:refs/heads/%s" branch target))
          :log-args (if has-remote-branch
                        (list "log" "--stat" (format "%s..%s" remote-ref branch))
                      (list "log" "--stat" "-10" branch)))
       (repo-dashboard--wrap-up-item
        record 'in-sync
-       (concat (format "%s in sync with %s" branch remote)
+       (concat (format "%s in sync with %s/%s" branch remote target)
                (if note (concat "; " note) ""))))))
 
 (defun repo-dashboard--wrap-up-origin-items (record)
