@@ -34,13 +34,15 @@
 ;;
 ;; Comments and blank lines are ignored.  A third field may name an
 ;; extra remote as NAME=URL; a field of the form sync=POLICY sets the
-;; wrap-up policy (see `repo-dashboard-sync-policies'); other extra
-;; fields are ignored.
+;; repository's sync policy (see `repo-dashboard-sync-policies');
+;; other extra fields are ignored.
 ;;
-;; The dashboard is opened with `repo-dashboard'.  The command
-;; `repo-dashboard-wrap-up' (bound to W) prepares an end-of-session
-;; sync plan: it snapshot-commits dirty wip-policy repositories and
-;; presents pending pushes for review and one-key execution.
+;; The dashboard is opened with `repo-dashboard'.  Sync policies make
+;; the usual dashboard flow double as an end-of-session sync: the
+;; state column shows each repository's pending action (fast-forward
+;; pull, push, or wip snapshot-and-push), o shows the outgoing log
+;; that an action would push, and x / X execute the safe actions for
+;; the marked or all repositories.
 
 ;;; Code:
 
@@ -574,6 +576,11 @@ CURRENT-BRANCH is used to mark the current row."
          "expected")
         (remote-problems
          "remote problem")
+        ((eq (car (repo-dashboard--sync-policy record)) 'wip)
+         (cond
+          ((> dirty 0) "wip snapshot")
+          ((plist-get record :wip-push) "wip push")
+          (t "ok")))
         ((> dirty 0)
          (if branches "dirty+drift" "dirty"))
         ((and (> current-ahead 0) (> current-behind 0))
@@ -643,6 +650,15 @@ CURRENT-BRANCH is used to mark the current row."
                                 (repo-dashboard--record-ahead record)))
         (setq record (plist-put record :behind
                                 (repo-dashboard--record-behind record)))
+        (pcase-let ((`(,policy . ,remote)
+                     (repo-dashboard--sync-policy record)))
+          (when (and (eq policy 'wip) branch)
+            (let ((extras (repo-dashboard--wip-scan-extras
+                           root branch remote)))
+              (setq record (plist-put record :wip-push
+                                      (plist-get extras :wip-push)))
+              (setq record (plist-put record :siblings
+                                      (plist-get extras :siblings))))))
         (plist-put record :state (repo-dashboard--record-state record)))))))
 
 ;;; Display formatting
@@ -684,6 +700,7 @@ CURRENT-BRANCH is used to mark the current row."
          (branches (repo-dashboard--problem-branches record))
          (shown (seq-take branches 2))
          (parts (append remote-problems
+                        (plist-get record :siblings)
                         (mapcar #'repo-dashboard--branch-drift-string shown))))
     (when (> (length branches) (length shown))
       (setq parts (append parts (list (format "+%d more"
@@ -722,8 +739,10 @@ CURRENT-BRANCH is used to mark the current row."
     ("dirty+drift" 3)
     ("dirty" 4)
     ("diverged" 5)
+    ("wip snapshot" 5)
     ("pullable" 6)
     ("pushable" 7)
+    ("wip push" 7)
     ("branch drift" 8)
     ("unpushed" 9)
     ("scanning" 98)
@@ -1428,49 +1447,37 @@ Return the process exit status."
 
 ;;; Bulk safe action
 
-(defun repo-dashboard--safe-pull-records (records)
-  "Return records from RECORDS eligible for a default safe pull."
-  (seq-filter #'repo-dashboard--safe-pull-p records))
-
-(defun repo-dashboard--run-safe-pulls (records)
-  "Run fast-forward pulls for RECORDS."
-  (let ((eligible (repo-dashboard--safe-pull-records records)))
-    (unless eligible
-      (user-error "No safe pulls available"))
-    (when (yes-or-no-p
-           (format "Run git pull --ff-only in %d repo(s)? " (length eligible)))
-      (repo-dashboard--run-shell-command
-       eligible
-       (concat repo-dashboard-git-program " pull --ff-only")
-       nil)
-      (repo-dashboard-refresh))))
-
 (defun repo-dashboard-execute-safe ()
-  "Execute the default safe action on marked repos, or current repo.
-The default safe action is a fast-forward pull on clean current branches
-that are behind their upstream and not ahead."
+  "Execute the pending safe sync action on marked repos, or current repo.
+Depending on each repository's sync policy (see
+`repo-dashboard-sync-policies'), the safe action is a fast-forward
+pull, a push of a cleanly-ahead current branch, or a wip
+snapshot-and-push."
   (interactive)
-  (repo-dashboard--run-safe-pulls (repo-dashboard--records-for-action)))
+  (repo-dashboard--execute-sync-actions (repo-dashboard--records-for-action)))
 
 (defun repo-dashboard-execute-safe-all ()
-  "Execute the default safe action on all eligible repositories."
+  "Execute the pending safe sync action on all eligible repositories."
   (interactive)
-  (repo-dashboard--run-safe-pulls repo-dashboard--records))
+  (repo-dashboard--execute-sync-actions repo-dashboard--records))
 
-;;; Wrap-up (end-of-session sync)
+;;; Sync policies (wrap-up)
 
 (defcustom repo-dashboard-sync-policies nil
-  "Alist mapping repositories to wrap-up sync policies.
+  "Alist mapping repositories to sync policies.
 Each key is a repository path (tilde allowed) or a bare repository
 name.  Each value is one of:
 
-- `origin' -- a normal repository: wrap-up expects it clean and offers
-  to push branches that are ahead of their upstream.
-- `wip', or (wip . REMOTE) -- a working repository: wrap-up
-  snapshot-commits any uncommitted changes and offers to push the
-  current branch to REMOTE (default \"wip\") with --force-with-lease.
-- `ignore' -- expected to be dirty or diverged: wrap-up skips it, and
-  the dashboard shows its state as \"expected\".
+- `origin' -- a normal repository: the dashboard expects it clean and
+  `repo-dashboard-execute-safe' pushes branches that are ahead of
+  their upstream and cleanly fast-forwardable.
+- `wip', or (wip . REMOTE) -- a working repository:
+  `repo-dashboard-execute-safe' snapshot-commits any uncommitted
+  changes and force-pushes the current branch to
+  NAMESPACE/BRANCH on REMOTE (default \"wip\"); see
+  `repo-dashboard-wip-namespace'.
+- `ignore' -- expected to be dirty or diverged: shown as \"expected\"
+  and never acted on.
 
 Repositories not listed default to `origin'.  Manifest lines can also
 set the policy with a field of the form sync=origin, sync=wip,
@@ -1478,25 +1485,13 @@ sync=wip:REMOTE, or sync=ignore."
   :type '(alist :key-type string :value-type sexp)
   :group 'repo-dashboard)
 
-(defcustom repo-dashboard-wrap-up-snapshot-message-function
-  #'repo-dashboard-wrap-up-default-snapshot-message
-  "Function returning the commit message for wrap-up snapshot commits.
-Called with the repository record."
-  :type 'function
-  :group 'repo-dashboard)
-
-(defcustom repo-dashboard-wrap-up-buffer-name "*Repo Dashboard Wrap-Up*"
-  "Name of the wrap-up plan buffer."
-  :type 'string
-  :group 'repo-dashboard)
-
-(defcustom repo-dashboard-wrap-up-wip-namespace 'system-name
-  "Namespace for branches pushed by wip-policy wrap-up.
-When non-nil, a wip-policy wrap-up pushes branch BRANCH to
-NAMESPACE/BRANCH on the wip remote instead of BRANCH, so that machines
-sharing a remote never write to each other's refs and the forced push
-can only overwrite this machine's own previous snapshot.  The value is
-a string, or the symbol `system-name' to use a sanitized `system-name'.
+(defcustom repo-dashboard-wip-namespace 'system-name
+  "Namespace for branches pushed by wip-policy sync.
+When non-nil, wip-policy sync pushes branch BRANCH to NAMESPACE/BRANCH
+on the wip remote instead of BRANCH, so that machines sharing a remote
+never write to each other's refs and the forced push can only
+overwrite this machine's own previous snapshot.  The value is a
+string, or the symbol `system-name' to use a sanitized `system-name'.
 Set to nil to push to the unqualified branch name (only safe when a
 single machine pushes to the remote)."
   :type '(choice (const :tag "Machine name" system-name)
@@ -1504,17 +1499,15 @@ single machine pushes to the remote)."
                  (const :tag "None (single machine only)" nil))
   :group 'repo-dashboard)
 
-(defun repo-dashboard--wrap-up-wip-namespace ()
-  "Return the effective wip namespace string, or nil."
-  (pcase repo-dashboard-wrap-up-wip-namespace
-    ('system-name
-     (let ((name (downcase (car (split-string (system-name) "\\.")))))
-       (replace-regexp-in-string "[^a-z0-9-]" "-" name)))
-    ((and (pred stringp) name) name)
-    (_ nil)))
+(defcustom repo-dashboard-snapshot-message-function
+  #'repo-dashboard-default-snapshot-message
+  "Function returning the commit message for wip snapshot commits.
+Called with the repository record."
+  :type 'function
+  :group 'repo-dashboard)
 
-(defun repo-dashboard-wrap-up-default-snapshot-message (_record)
-  "Return the default wrap-up snapshot commit message."
+(defun repo-dashboard-default-snapshot-message (_record)
+  "Return the default wip snapshot commit message."
   (format-time-string "; wip snapshot %F %R"))
 
 (defun repo-dashboard--parse-sync-token (token)
@@ -1547,6 +1540,20 @@ single machine pushes to the remote)."
       (`(wip . ,remote) (cons 'wip remote))
       (_ '(origin . nil)))))
 
+(defun repo-dashboard--wip-namespace ()
+  "Return the effective wip namespace string, or nil."
+  (pcase repo-dashboard-wip-namespace
+    ('system-name
+     (let ((name (downcase (car (split-string (system-name) "\\.")))))
+       (replace-regexp-in-string "[^a-z0-9-]" "-" name)))
+    ((and (pred stringp) name) name)
+    (_ nil)))
+
+(defun repo-dashboard--wip-target (branch)
+  "Return the namespaced wip target ref name for BRANCH."
+  (let ((namespace (repo-dashboard--wip-namespace)))
+    (if namespace (format "%s/%s" namespace branch) branch)))
+
 (defun repo-dashboard--git-status-output (dir &rest args)
   "Run Git in DIR with ARGS; return (EXIT-STATUS . OUTPUT)."
   (with-temp-buffer
@@ -1555,67 +1562,22 @@ single machine pushes to the remote)."
                          "-C" dir args)))
       (cons status (string-trim (buffer-string))))))
 
-(defun repo-dashboard--wrap-up-snapshot (record)
-  "Snapshot-commit uncommitted changes in RECORD.
-Return a result string, or nil when the commit failed."
-  (let ((dir (plist-get record :path))
-        (message (funcall repo-dashboard-wrap-up-snapshot-message-function
-                          record)))
-    (and (repo-dashboard--git-success-p dir "add" "-A")
-         (repo-dashboard--git-success-p dir "commit" "-m" message)
-         (format "snapshot committed (%s)" message))))
-
-(defun repo-dashboard--wrap-up-item (record kind desc &rest props)
-  "Return a wrap-up plan item for RECORD with KIND, DESC and PROPS."
-  (append (list :record record :kind kind :desc desc :status 'pending)
-          props))
-
-(defun repo-dashboard--wrap-up-wip-item (record remote note)
-  "Return the wrap-up item for wip-policy RECORD pushing to REMOTE.
-NOTE describes a snapshot commit made beforehand, if any.  The target
-branch is namespaced per `repo-dashboard-wrap-up-wip-namespace', so
-that the forced push can only overwrite this machine's own snapshots."
-  (let* ((dir (plist-get record :path))
-         (branch (plist-get record :branch))
-         (namespace (repo-dashboard--wrap-up-wip-namespace))
-         (target (if namespace (format "%s/%s" namespace branch) branch))
+(defun repo-dashboard--wip-scan-extras (dir branch remote)
+  "Return wip scan info for DIR's BRANCH against REMOTE.
+Returns a plist with :wip-push (non-nil when the namespaced remote ref
+is missing or behind BRANCH) and :siblings (strings describing other
+namespaces' refs holding commits absent from BRANCH).  Uses existing
+remote-tracking refs; fetch (\\[repo-dashboard-fetch-all]) to refresh
+them."
+  (let* ((target (repo-dashboard--wip-target branch))
          (remote-ref (format "%s/%s" remote target))
-         (has-remote-branch
-          (repo-dashboard--git-success-p dir "rev-parse" "--verify"
-                                         "--quiet" remote-ref))
-         (ahead (and has-remote-branch
+         (has-ref (repo-dashboard--git-success-p
+                   dir "rev-parse" "--verify" "--quiet" remote-ref))
+         (ahead (and has-ref
                      (car (repo-dashboard--ahead-behind
-                           dir branch remote-ref)))))
-    (if (or (not has-remote-branch) (> (or ahead 0) 0))
-        (repo-dashboard--wrap-up-item
-         record 'push
-         (format "push %s to %s/%s%s%s"
-                 branch remote target
-                 (if has-remote-branch
-                     (format " (%d commit%s)" ahead (if (= ahead 1) "" "s"))
-                   " (new branch)")
-                 (if note (concat "; " note) ""))
-         :args (list "push"
-                     (format "--force-with-lease=refs/heads/%s" target)
-                     remote
-                     (format "%s:refs/heads/%s" branch target))
-         :log-args (if has-remote-branch
-                       (list "log" "--stat" (format "%s..%s" remote-ref branch))
-                     (list "log" "--stat" "-10" branch)))
-      (repo-dashboard--wrap-up-item
-       record 'in-sync
-       (concat (format "%s in sync with %s/%s" branch remote target)
-               (if note (concat "; " note) ""))))))
-
-(defun repo-dashboard--wrap-up-sibling-items (record remote)
-  "Return items describing other machines' wip refs for RECORD on REMOTE.
-For the current branch BRANCH, any ref REMOTE/NS/BRANCH whose NS is not
-this machine's namespace is a sibling; report the ones holding commits
-that are not in the local branch."
-  (let* ((dir (plist-get record :path))
-         (branch (plist-get record :branch))
-         (namespace (repo-dashboard--wrap-up-wip-namespace))
-         items)
+                           dir branch remote-ref))))
+         (namespace (repo-dashboard--wip-namespace))
+         siblings)
     (dolist (ref (repo-dashboard--git-lines
                   dir "for-each-ref" "--format=%(refname:short)"
                   (format "refs/remotes/%s/*/%s" remote branch)))
@@ -1627,274 +1589,137 @@ that are not in the local branch."
         (when (and sibling-ns
                    (not (string-empty-p sibling-ns))
                    (not (equal sibling-ns namespace)))
-          (let* ((counts (repo-dashboard--ahead-behind dir branch ref))
-                 (missing (cdr counts))
-                 (only-local (car counts)))
+          (let ((missing (cdr (repo-dashboard--ahead-behind
+                               dir branch ref))))
             (when (and missing (> missing 0))
-              (push (repo-dashboard--wrap-up-item
-                     record 'sibling
-                     (format "%s: %s has %d commit%s not in local %s%s"
-                             sibling-ns ref missing
-                             (if (= missing 1) "" "s")
-                             branch
-                             (if (> only-local 0)
-                                 (format " (%d only local)" only-local)
-                               ""))
-                     :log-args (list "log" "--stat"
-                                     (format "%s..%s" branch ref)))
-                    items))))))
-    (nreverse items)))
+              (push (format "%s +%d" sibling-ns missing) siblings))))))
+    (list :wip-push (or (not has-ref) (> (or ahead 0) 0))
+          :siblings (nreverse siblings))))
 
-(defun repo-dashboard--wrap-up-origin-items (record)
-  "Return wrap-up items for origin-policy RECORD."
-  (let ((dirty (plist-get record :dirty))
-        (problems (plist-get record :remote-problems))
-        items)
+(defun repo-dashboard--snapshot-commit (record)
+  "Snapshot-commit uncommitted changes in RECORD.
+Return a result string, or nil when the commit failed."
+  (let ((dir (plist-get record :path))
+        (message (funcall repo-dashboard-snapshot-message-function record)))
+    (and (repo-dashboard--git-success-p dir "add" "-A")
+         (repo-dashboard--git-success-p dir "commit" "-m" message)
+         (format "snapshot committed (%s)" message))))
+
+(defun repo-dashboard--wip-sync (record remote)
+  "Fetch, snapshot and push RECORD's current branch to REMOTE.
+Return (t . MESSAGE) on success, (nil . MESSAGE) on failure."
+  (let* ((dir (plist-get record :path))
+         (branch (plist-get record :branch))
+         (target (repo-dashboard--wip-target branch)))
     (cond
-     (problems
-      (push (repo-dashboard--wrap-up-item
-             record 'attention
-             (format "remote problem: %s" (string-join problems "; ")))
-            items))
-     ((> dirty 0)
-      (push (repo-dashboard--wrap-up-item
-             record 'attention
-             (format "%d uncommitted change%s (commit or add a sync=wip policy)"
-                     dirty (if (= dirty 1) "" "s")))
-            items))
+     ((not (repo-dashboard--git-success-p dir "fetch" remote))
+      (cons nil (format "fetch from %s failed" remote)))
+     ((and (> (repo-dashboard--dirty-count dir) 0)
+           (not (repo-dashboard--snapshot-commit record)))
+      (cons nil "snapshot commit failed"))
      (t
-      (dolist (status (plist-get record :branches))
-        (let ((branch (plist-get status :branch))
-              (upstream (plist-get status :upstream))
-              (ahead (plist-get status :ahead))
-              (behind (plist-get status :behind)))
-          (cond
-           ((and (> ahead 0) (> behind 0))
-            (push (repo-dashboard--wrap-up-item
-                   record 'attention
-                   (format "%s diverged from %s (+%d -%d)"
-                           branch upstream ahead behind))
-                  items))
-           ((> ahead 0)
-            (push (repo-dashboard--wrap-up-item
-                   record 'push
-                   (format "push %s to %s (%d commit%s)"
-                           branch upstream ahead (if (= ahead 1) "" "s"))
-                   :args (list "push"
-                               (car (split-string upstream "/"))
-                               branch)
-                   :log-args (list "log" "--stat"
-                                   (format "%s..%s" upstream branch)))
-                  items)))))
-      (when (and (null items) (> (plist-get record :unpushed) 0))
-        (push (repo-dashboard--wrap-up-item
-               record 'attention
-               (format "%d commit%s on branches with no remote counterpart"
-                       (plist-get record :unpushed)
-                       (if (= (plist-get record :unpushed) 1) "" "s")))
-              items))))
-    (nreverse items)))
+      (let ((result (repo-dashboard--git-status-output
+                     dir "push"
+                     (format "--force-with-lease=refs/heads/%s" target)
+                     remote
+                     (format "%s:refs/heads/%s" branch target))))
+        (if (zerop (car result))
+            (cons t (format "pushed %s to %s/%s" branch remote target))
+          (cons nil (cdr result))))))))
 
-(defun repo-dashboard--wrap-up-items (records)
-  "Return the wrap-up plan for RECORDS, snapshotting wip repositories."
-  (let (items)
-    (dolist (record records)
-      (when (eq (plist-get record :kind) 'git)
-        (pcase-let ((`(,policy . ,remote) (repo-dashboard--sync-policy record)))
-          (pcase policy
-            ('ignore
-             (unless (string= (plist-get record :state) "ok")
-               (push (repo-dashboard--wrap-up-item
-                      record 'expected (plist-get record :state))
-                     items)))
-            ('wip
-             (let (note)
-               ;; Fetch so that sibling comparisons and the push lease
-               ;; are based on the remote's current state.
-               (unless (repo-dashboard--git-success-p
-                        (plist-get record :path) "fetch" remote)
-                 (push (repo-dashboard--wrap-up-item
-                        record 'attention
-                        (format "fetch from %s FAILED" remote))
-                       items))
-               (when (> (plist-get record :dirty) 0)
-                 (setq note (repo-dashboard--wrap-up-snapshot record))
-                 (unless note
-                   (push (repo-dashboard--wrap-up-item
-                          record 'attention "snapshot commit FAILED")
-                         items))
-                 (setq record (repo-dashboard--scan record)))
-               (when (or note (zerop (plist-get record :dirty)))
-                 (push (repo-dashboard--wrap-up-wip-item record remote note)
-                       items))
-               (dolist (item (repo-dashboard--wrap-up-sibling-items
-                              record remote))
-                 (push item items))))
-            (_
-             (dolist (item (repo-dashboard--wrap-up-origin-items record))
-               (push item items)))))))
-    (nreverse (delq nil items))))
+(defun repo-dashboard--origin-push (record)
+  "Push RECORD's current branch to its upstream.
+Return (t . MESSAGE) on success, (nil . MESSAGE) on failure."
+  (let* ((dir (plist-get record :path))
+         (current (repo-dashboard--current-branch-status record))
+         (branch (plist-get current :branch))
+         (upstream (plist-get current :upstream))
+         (remote (car (split-string upstream "/")))
+         (result (repo-dashboard--git-status-output
+                  dir "push" remote branch)))
+    (if (zerop (car result))
+        (cons t (format "pushed %s to %s" branch upstream))
+      (cons nil (cdr result)))))
 
-(defvar-local repo-dashboard--wrap-up-items nil
-  "Wrap-up plan items shown in the current wrap-up buffer.")
+(defun repo-dashboard--sync-action (record)
+  "Return the pending sync action symbol for RECORD, or nil.
+One of `pull', `push' or `wip-sync'."
+  (when (eq (plist-get record :kind) 'git)
+    (pcase-let ((`(,policy . ,_remote) (repo-dashboard--sync-policy record)))
+      (pcase policy
+        ('ignore nil)
+        ('wip (and (or (> (plist-get record :dirty) 0)
+                       (plist-get record :wip-push))
+                   'wip-sync))
+        (_ (cond
+            ((repo-dashboard--safe-pull-p record) 'pull)
+            ((repo-dashboard--safe-push-p record) 'push)))))))
 
-(defun repo-dashboard--wrap-up-item-at-point ()
-  "Return the wrap-up item at point, or signal an error."
-  (or (get-text-property (point) 'repo-dashboard-wrap-up-item)
-      (user-error "No wrap-up item on this line")))
+(defun repo-dashboard--execute-sync-actions (records)
+  "Execute pending sync actions for RECORDS, reporting a receipt."
+  (let* ((dashboard (current-buffer))
+         (actionable (seq-filter #'repo-dashboard--sync-action records))
+         (summary (mapconcat
+                   (lambda (kind)
+                     (let ((n (seq-count
+                               (lambda (r)
+                                 (eq (repo-dashboard--sync-action r) kind))
+                               actionable)))
+                       (and (> n 0) (format "%s %d" kind n))))
+                   '(pull push wip-sync) " ")))
+    (unless actionable
+      (user-error "No safe sync actions available"))
+    (when (yes-or-no-p (format "Sync (%s repo(s): %s)? "
+                               (length actionable) (string-trim summary)))
+      (let (failures)
+        (dolist (record actionable)
+          (let* ((action (repo-dashboard--sync-action record))
+                 (result
+                  (pcase action
+                    ('pull (repo-dashboard--git-status-output
+                            (plist-get record :path) "pull" "--ff-only"))
+                    ('push (repo-dashboard--origin-push record))
+                    ('wip-sync
+                     (repo-dashboard--wip-sync
+                      record
+                      (cdr (repo-dashboard--sync-policy record))))))
+                 (ok (pcase action
+                       ('pull (zerop (car result)))
+                       (_ (car result)))))
+            (unless ok
+              (push (format "%s: %s" (plist-get record :name) (cdr result))
+                    failures))
+            (repo-dashboard--rescan-record record dashboard)))
+        (if failures
+            (message "Sync finished with failures: %s"
+                     (string-join (nreverse failures) " | "))
+          (message "Sync finished: %s" (string-trim summary)))))))
 
-(defun repo-dashboard--wrap-up-status-string (item)
-  "Return the status tag for ITEM."
-  (pcase (plist-get item :status)
-    ('pending (if (eq (plist-get item :kind) 'push) "[ ]" "   "))
-    ('done "[x]")
-    ('failed "[!]")
-    (_ "   ")))
-
-(defun repo-dashboard--wrap-up-render ()
-  "Render `repo-dashboard--wrap-up-items' into the current buffer."
-  (let ((inhibit-read-only t)
-        (items repo-dashboard--wrap-up-items))
-    (erase-buffer)
-    (insert (propertize "Repo Dashboard wrap-up\n" 'face 'bold)
-            (format-time-string "%F %R  ")
-            (substitute-command-keys
-             "\\[repo-dashboard-wrap-up-push] push at point, \
-\\[repo-dashboard-wrap-up-log] outgoing log, \
-\\[repo-dashboard-wrap-up-push-all] push all, \
-\\[repo-dashboard-wrap-up-refresh] refresh\n"))
-    (dolist (section '((push . "Pending pushes")
-                       (sibling . "Other machines")
-                       (attention . "Needs attention")
-                       (expected . "Expected (policy: ignore)")
-                       (in-sync . "In sync")))
-      (let ((section-items (seq-filter (lambda (item)
-                                         (eq (plist-get item :kind)
-                                             (car section)))
-                                       items)))
-        (when section-items
-          (insert (propertize (format "\n%s\n" (cdr section)) 'face 'bold))
-          (dolist (item section-items)
-            (let* ((record (plist-get item :record))
-                   (face (pcase (plist-get item :kind)
-                           ('attention 'repo-dashboard-warning-face)
-                           ('sibling 'repo-dashboard-warning-face)
-                           ('expected 'repo-dashboard-muted-face)
-                           ('in-sync 'repo-dashboard-ok-face)
-                           (_ (pcase (plist-get item :status)
-                                ('done 'repo-dashboard-ok-face)
-                                ('failed 'repo-dashboard-error-face)
-                                (_ 'default)))))
-                   (line (format "  %s %-24s %s%s\n"
-                                 (repo-dashboard--wrap-up-status-string item)
-                                 (plist-get record :name)
-                                 (plist-get item :desc)
-                                 (if (plist-get item :output)
-                                     (format "  — %s"
-                                             (car (split-string
-                                                   (plist-get item :output)
-                                                   "\n")))
-                                   ""))))
-              (insert (propertize line
-                                  'face face
-                                  'repo-dashboard-wrap-up-item item)))))))
-    (goto-char (point-min))))
-
-(defun repo-dashboard--wrap-up-execute (item)
-  "Execute wrap-up ITEM if it is a pending push."
-  (when (and (eq (plist-get item :kind) 'push)
-             (eq (plist-get item :status) 'pending))
-    (let* ((record (plist-get item :record))
-           (result (apply #'repo-dashboard--git-status-output
-                          (plist-get record :path)
-                          (plist-get item :args))))
-      (if (zerop (car result))
-          (plist-put item :status 'done)
-        (plist-put item :status 'failed)
-        (plist-put item :output (cdr result)))
-      item)))
-
-(defun repo-dashboard-wrap-up-push ()
-  "Execute the pending push at point."
+(defun repo-dashboard-outgoing-log ()
+  "Show the log of commits that a sync would push for the repo at point."
   (interactive)
-  (let ((item (repo-dashboard--wrap-up-item-at-point)))
-    (unless (eq (plist-get item :kind) 'push)
-      (user-error "Not a push item"))
-    (repo-dashboard--wrap-up-execute item)
-    (repo-dashboard--wrap-up-render)))
-
-(defun repo-dashboard-wrap-up-push-all ()
-  "Execute all pending pushes in the wrap-up buffer."
-  (interactive)
-  (let ((count 0))
-    (dolist (item repo-dashboard--wrap-up-items)
-      (when (repo-dashboard--wrap-up-execute item)
-        (setq count (1+ count))))
-    (repo-dashboard--wrap-up-render)
-    (message "Wrap-up: executed %d push(es)" count)))
-
-(defun repo-dashboard-wrap-up-log ()
-  "Show the outgoing log for the wrap-up item at point."
-  (interactive)
-  (let* ((item (repo-dashboard--wrap-up-item-at-point))
-         (log-args (or (plist-get item :log-args)
-                       (user-error "No log available for this item"))))
-    (apply #'repo-dashboard--display-git-command
-           (plist-get item :record)
-           repo-dashboard-log-buffer-name
-           log-args)))
-
-(defun repo-dashboard-wrap-up-visit ()
-  "Visit the repository of the wrap-up item at point with `vc-dir'."
-  (interactive)
-  (let ((item (repo-dashboard--wrap-up-item-at-point)))
-    (vc-dir (plist-get (plist-get item :record) :path))))
-
-(defun repo-dashboard-wrap-up-refresh ()
-  "Recompute the wrap-up plan."
-  (interactive)
-  (repo-dashboard-wrap-up))
-
-(defvar repo-dashboard-wrap-up-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "p") #'repo-dashboard-wrap-up-push)
-    (define-key map (kbd "x") #'repo-dashboard-wrap-up-push-all)
-    (define-key map (kbd "l") #'repo-dashboard-wrap-up-log)
-    (define-key map (kbd "RET") #'repo-dashboard-wrap-up-visit)
-    (define-key map (kbd "g") #'repo-dashboard-wrap-up-refresh)
-    (define-key map (kbd "n") #'next-line)
-    (define-key map (kbd "SPC") #'next-line)
-    map)
-  "Keymap used in `repo-dashboard-wrap-up-mode'.")
-
-(define-derived-mode repo-dashboard-wrap-up-mode special-mode "Repo Wrap-Up"
-  "Major mode for reviewing and executing an end-of-session sync plan.")
-
-;;;###autoload
-(defun repo-dashboard-wrap-up ()
-  "Prepare and display an end-of-session sync plan for all repositories.
-Scans every known repository synchronously, snapshot-commits dirty
-repositories whose policy is `wip' (see `repo-dashboard-sync-policies'),
-and shows the resulting plan.  Nothing is pushed until confirmed from
-the plan buffer, where the outgoing log of each pending push can be
-reviewed first."
-  (interactive)
-  (message "Wrap-up: scanning repositories...")
-  (let* ((descriptors (mapcar #'repo-dashboard--descriptor-with-scan-key
-                              (repo-dashboard--collect-descriptors)))
-         (records (mapcar #'repo-dashboard--scan descriptors))
-         (items (repo-dashboard--wrap-up-items records))
-         (buffer (get-buffer-create repo-dashboard-wrap-up-buffer-name)))
-    (with-current-buffer buffer
-      (repo-dashboard-wrap-up-mode)
-      (setq repo-dashboard--wrap-up-items items)
-      (repo-dashboard--wrap-up-render))
-    (pop-to-buffer buffer)
-    (message "Wrap-up: %d pending push(es), %d needing attention"
-             (seq-count (lambda (item) (eq (plist-get item :kind) 'push))
-                        items)
-             (seq-count (lambda (item) (eq (plist-get item :kind) 'attention))
-                        items))))
+  (let* ((record (repo-dashboard--require-record))
+         (branch (plist-get record :branch))
+         (range
+          (pcase-let ((`(,policy . ,remote)
+                       (repo-dashboard--sync-policy record)))
+            (pcase policy
+              ('wip
+               (let ((remote-ref (format "%s/%s" remote
+                                         (repo-dashboard--wip-target branch))))
+                 (if (repo-dashboard--git-success-p
+                      (plist-get record :path)
+                      "rev-parse" "--verify" "--quiet" remote-ref)
+                     (format "%s..%s" remote-ref branch)
+                   branch)))
+              (_
+               (let ((current (repo-dashboard--current-branch-status record)))
+                 (if (and current (plist-get current :upstream))
+                     (format "%s..%s" (plist-get current :upstream) branch)
+                   branch)))))))
+    (repo-dashboard--display-git-command
+     record repo-dashboard-log-buffer-name
+     "log" "--stat" range)))
 
 ;;; Shell commands
 
@@ -2028,7 +1853,7 @@ output lines with the repository name."
     (define-key map (kbd "*") repo-dashboard-mark-map)
     (define-key map (kbd "x") #'repo-dashboard-execute-safe)
     (define-key map (kbd "X") #'repo-dashboard-execute-safe-all)
-    (define-key map (kbd "W") #'repo-dashboard-wrap-up)
+    (define-key map (kbd "o") #'repo-dashboard-outgoing-log)
     (define-key map (kbd "!") #'repo-dashboard-shell-command)
     (define-key map (kbd "&") #'repo-dashboard-async-shell-command)
     (define-key map (kbd "?") #'describe-mode)
