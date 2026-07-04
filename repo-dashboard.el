@@ -1607,6 +1607,44 @@ that the forced push can only overwrite this machine's own snapshots."
        (concat (format "%s in sync with %s/%s" branch remote target)
                (if note (concat "; " note) ""))))))
 
+(defun repo-dashboard--wrap-up-sibling-items (record remote)
+  "Return items describing other machines' wip refs for RECORD on REMOTE.
+For the current branch BRANCH, any ref REMOTE/NS/BRANCH whose NS is not
+this machine's namespace is a sibling; report the ones holding commits
+that are not in the local branch."
+  (let* ((dir (plist-get record :path))
+         (branch (plist-get record :branch))
+         (namespace (repo-dashboard--wrap-up-wip-namespace))
+         items)
+    (dolist (ref (repo-dashboard--git-lines
+                  dir "for-each-ref" "--format=%(refname:short)"
+                  (format "refs/remotes/%s/*/%s" remote branch)))
+      (let ((sibling-ns
+             (and (string-prefix-p (concat remote "/") ref)
+                  (string-suffix-p (concat "/" branch) ref)
+                  (substring ref (1+ (length remote))
+                             (- (length ref) (1+ (length branch)))))))
+        (when (and sibling-ns
+                   (not (string-empty-p sibling-ns))
+                   (not (equal sibling-ns namespace)))
+          (let* ((counts (repo-dashboard--ahead-behind dir branch ref))
+                 (missing (cdr counts))
+                 (only-local (car counts)))
+            (when (and missing (> missing 0))
+              (push (repo-dashboard--wrap-up-item
+                     record 'sibling
+                     (format "%s: %s has %d commit%s not in local %s%s"
+                             sibling-ns ref missing
+                             (if (= missing 1) "" "s")
+                             branch
+                             (if (> only-local 0)
+                                 (format " (%d only local)" only-local)
+                               ""))
+                     :log-args (list "log" "--stat"
+                                     (format "%s..%s" branch ref)))
+                    items))))))
+    (nreverse items)))
+
 (defun repo-dashboard--wrap-up-origin-items (record)
   "Return wrap-up items for origin-policy RECORD."
   (let ((dirty (plist-get record :dirty))
@@ -1671,6 +1709,14 @@ that the forced push can only overwrite this machine's own snapshots."
                      items)))
             ('wip
              (let (note)
+               ;; Fetch so that sibling comparisons and the push lease
+               ;; are based on the remote's current state.
+               (unless (repo-dashboard--git-success-p
+                        (plist-get record :path) "fetch" remote)
+                 (push (repo-dashboard--wrap-up-item
+                        record 'attention
+                        (format "fetch from %s FAILED" remote))
+                       items))
                (when (> (plist-get record :dirty) 0)
                  (setq note (repo-dashboard--wrap-up-snapshot record))
                  (unless note
@@ -1680,7 +1726,10 @@ that the forced push can only overwrite this machine's own snapshots."
                  (setq record (repo-dashboard--scan record)))
                (when (or note (zerop (plist-get record :dirty)))
                  (push (repo-dashboard--wrap-up-wip-item record remote note)
-                       items))))
+                       items))
+               (dolist (item (repo-dashboard--wrap-up-sibling-items
+                              record remote))
+                 (push item items))))
             (_
              (dolist (item (repo-dashboard--wrap-up-origin-items record))
                (push item items)))))))
@@ -1715,6 +1764,7 @@ that the forced push can only overwrite this machine's own snapshots."
 \\[repo-dashboard-wrap-up-push-all] push all, \
 \\[repo-dashboard-wrap-up-refresh] refresh\n"))
     (dolist (section '((push . "Pending pushes")
+                       (sibling . "Other machines")
                        (attention . "Needs attention")
                        (expected . "Expected (policy: ignore)")
                        (in-sync . "In sync")))
@@ -1728,6 +1778,7 @@ that the forced push can only overwrite this machine's own snapshots."
             (let* ((record (plist-get item :record))
                    (face (pcase (plist-get item :kind)
                            ('attention 'repo-dashboard-warning-face)
+                           ('sibling 'repo-dashboard-warning-face)
                            ('expected 'repo-dashboard-muted-face)
                            ('in-sync 'repo-dashboard-ok-face)
                            (_ (pcase (plist-get item :status)
