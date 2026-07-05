@@ -62,11 +62,12 @@ In the dashboard:
 | =g= | Refresh all repository state |
 | =.= | Rescan the repository at point, or all marked repos |
 | =RET= | Open =vc-dir= for the repository |
+| =i= | Explain the row state with reproduction commands and next steps |
 | =j= | Open Dired at the repository root |
 | =A= | Search tracked files in marked repos, or the repo at point |
 | =C-x g= | Open Magit status for the repository, when Magit is available |
-| ~=~ | Show a useful diff for the repository |
-| =l= | Show a compact Git log for the current or selected drift branch |
+| ~=~ | Show a useful diff or local-only commit patches for the repository |
+| =l= | Show a compact Git log for the current, selected drift, or local-only branch |
 | =f= | Fetch all remotes for the current repository |
 | =F= | Fetch all remotes for all known repositories asynchronously |
 | =+= | Open/reuse =vc-dir= for the repository and call =vc-pull= |

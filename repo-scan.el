@@ -33,9 +33,16 @@
 ;;   ~/work/project git@github.com:user/project.git
 ;;
 ;; Comments and blank lines are ignored.  A third field may name an
-;; extra remote as NAME=URL; extra fields are ignored.
+;; extra remote as NAME=URL; a field of the form sync=POLICY sets the
+;; repository's sync policy (see `repo-scan-sync-policies');
+;; other extra fields are ignored.
 ;;
-;; The dashboard is opened with M-x repo-scan.
+;; The dashboard is opened with M-x repo-scan.  Sync policies make
+;; the usual dashboard flow double as an end-of-session sync: the
+;; state column shows each repository's pending action (fast-forward
+;; pull, push, or wip snapshot-and-push), o shows the outgoing log
+;; that an action would push, and x / X execute the safe actions for
+;; the marked or all repositories.
 
 ;;; Code:
 
@@ -134,6 +141,11 @@ Enable this by adding `repo-scan-source-emacs-package-roots' to
   :type 'string
   :group 'repo-scan)
 
+(defcustom repo-scan-info-buffer-name "*Repo Dashboard Info*"
+  "Buffer used for `repo-scan-info'."
+  :type 'string
+  :group 'repo-scan)
+
 (defface repo-scan-ok-face
   '((t :inherit success))
   "Face used for clean repositories."
@@ -216,6 +228,24 @@ When nil, use `repo-scan-sources'.")
            :name (repo-scan--repo-name expanded))
      props)))
 
+(defun repo-scan--normalize-descriptor (descriptor)
+  "Return DESCRIPTOR with the display fields required by the dashboard."
+  (let ((path (plist-get descriptor :path)))
+    (unless (stringp path)
+      (error "Repository descriptor missing string :path: %S" descriptor))
+    (let* ((expanded (repo-scan--expand-path path))
+           (normalized (copy-sequence descriptor)))
+      (setq normalized (plist-put normalized :path expanded))
+      (unless (plist-get normalized :display-path)
+        (setq normalized
+              (plist-put normalized :display-path
+                         (repo-scan--short-path expanded))))
+      (unless (plist-get normalized :name)
+        (setq normalized
+              (plist-put normalized :name
+                         (repo-scan--repo-name expanded))))
+      normalized)))
+
 (defun repo-scan--parse-manifest-line (line source)
   "Parse manifest LINE from SOURCE.
 Return nil for comments and blank lines."
@@ -225,12 +255,21 @@ Return nil for comments and blank lines."
       (let* ((fields (split-string trimmed "[ \t]+" t))
              (path (nth 0 fields))
              (origin (nth 1 fields))
-             (extra (nth 2 fields)))
+             (rest (cddr fields))
+             (sync (seq-find (lambda (field)
+                               (string-prefix-p "sync=" field))
+                             rest))
+             (extra (seq-find (lambda (field)
+                                (not (string-prefix-p "sync=" field)))
+                              rest)))
         (when path
           (repo-scan--descriptor
            path
            :origin origin
            :extra-remote (unless (or (null extra) (string= extra "-")) extra)
+           :sync-policy (and sync
+                             (repo-scan--parse-sync-token
+                              (substring sync (length "sync="))))
            :group "manifest"
            :source source))))))
 
@@ -301,8 +340,9 @@ Return nil for comments and blank lines."
         (sources (or repo-scan--source-functions repo-scan-sources))
         repos)
     (dolist (source sources)
-      (dolist (repo (funcall source))
-        (let ((key (file-truename (plist-get repo :path))))
+      (dolist (raw (funcall source))
+        (let* ((repo (repo-scan--normalize-descriptor raw))
+               (key (file-truename (plist-get repo :path))))
           (unless (gethash key seen)
             (puthash key t seen)
             (push repo repos)))))
@@ -471,6 +511,29 @@ Return nil for comments and blank lines."
   (repo-scan--count-lines
    (repo-scan--git-string dir "log" "--branches" "--not" "--remotes" "--oneline")))
 
+(defun repo-scan--unpushed-branch-count (dir branch)
+  "Return count of commits on BRANCH in DIR but on no remote."
+  (string-to-number
+   (or (repo-scan--git-string
+        dir "rev-list" "--count" branch "--not" "--remotes")
+       "0")))
+
+(defun repo-scan--unpushed-branches (dir current-branch)
+  "Return local branches in DIR with commits not on any remote."
+  (let (branches)
+    (dolist (line (repo-scan--local-branch-lines dir))
+      (pcase-let* ((`(,branch ,upstream) (split-string line "\t"))
+                   (count (repo-scan--unpushed-branch-count dir branch)))
+        (when (> count 0)
+          (push (list :branch branch
+                      :upstream (and upstream
+                                     (not (string-empty-p upstream))
+                                     upstream)
+                      :count count
+                      :current (equal branch current-branch))
+                branches))))
+    (nreverse branches)))
+
 (defun repo-scan--ahead-behind (dir branch upstream)
   "Return cons cell (AHEAD . BEHIND) for BRANCH and UPSTREAM in DIR."
   (when-let* ((counts (repo-scan--git-string
@@ -577,8 +640,17 @@ CURRENT-BRANCH is used to mark the current row."
             (current-ahead (or (and current (plist-get current :ahead)) 0))
             (current-behind (or (and current (plist-get current :behind)) 0)))
        (cond
+        ((and (eq (car (repo-scan--sync-policy record)) 'ignore)
+              (or remote-problems (> dirty 0) (> unpushed 0)
+                  branches (> current-ahead 0) (> current-behind 0)))
+         "expected")
         (remote-problems
          "remote problem")
+        ((eq (car (repo-scan--sync-policy record)) 'wip)
+         (cond
+          ((> dirty 0) "wip snapshot")
+          ((plist-get record :wip-push) "wip push")
+          (t "ok")))
         ((> dirty 0)
          (if branches "dirty+drift" "dirty"))
         ((and (> current-ahead 0) (> current-behind 0))
@@ -588,7 +660,7 @@ CURRENT-BRANCH is used to mark the current row."
         ((> current-ahead 0)
          "pushable")
         ((> unpushed 0)
-         "unpushed")
+         "local-only")
         (branches "branch drift")
         (t "ok"))))
     (_ "unknown")))
@@ -614,6 +686,7 @@ CURRENT-BRANCH is used to mark the current row."
                                    :branch ""
                                    :dirty 0
                                    :unpushed 0
+                                   :unpushed-branches nil
                                    :ahead 0
                                    :behind 0
                                    :branches nil))
@@ -624,12 +697,15 @@ CURRENT-BRANCH is used to mark the current row."
                                    :branch ""
                                    :dirty 0
                                    :unpushed 0
+                                   :unpushed-branches nil
                                    :ahead 0
                                    :behind 0
                                    :branches nil))
      (t
       (let* ((branch (repo-scan--current-branch root))
              (branches (repo-scan--branch-statuses root branch))
+             (unpushed-branches
+              (repo-scan--unpushed-branches root branch))
              (record (repo-scan--plist-merge
                       base
                       :kind 'git
@@ -643,11 +719,21 @@ CURRENT-BRANCH is used to mark the current row."
                       (repo-scan--remote-problems root descriptor)
                       :dirty (repo-scan--dirty-count root)
                       :unpushed (repo-scan--unpushed-count root)
+                      :unpushed-branches unpushed-branches
                       :branches branches)))
         (setq record (plist-put record :ahead
                                 (repo-scan--record-ahead record)))
         (setq record (plist-put record :behind
                                 (repo-scan--record-behind record)))
+        (pcase-let ((`(,policy . ,remote)
+                     (repo-scan--sync-policy record)))
+          (when (and (eq policy 'wip) branch)
+            (let ((extras (repo-scan--wip-scan-extras
+                           root branch remote)))
+              (setq record (plist-put record :wip-push
+                                      (plist-get extras :wip-push)))
+              (setq record (plist-put record :siblings
+                                      (plist-get extras :siblings))))))
         (plist-put record :state (repo-scan--record-state record)))))))
 
 ;;; Display formatting
@@ -660,9 +746,10 @@ CURRENT-BRANCH is used to mark the current row."
     ('missing 'repo-scan-error-face)
     ('non-git 'repo-scan-error-face)
     ('git
-     (if (string= (plist-get record :state) "ok")
-         'repo-scan-ok-face
-       'repo-scan-warning-face))
+     (pcase (plist-get record :state)
+       ("ok" 'repo-scan-ok-face)
+       ("expected" 'repo-scan-muted-face)
+       (_ 'repo-scan-warning-face)))
     (_ 'repo-scan-muted-face)))
 
 (defun repo-scan--format-count (n)
@@ -682,18 +769,56 @@ CURRENT-BRANCH is used to mark the current row."
             (when (> behind 0)
               (format " -%d" behind)))))
 
-(defun repo-scan--branches-text (record)
-  "Return compact branch and remote detail text for RECORD."
-  (let* ((remote-problems (plist-get record :remote-problems))
-         (branches (repo-scan--problem-branches record))
+(defun repo-scan--commit-word (count)
+  "Return a short commit count string for COUNT."
+  (format "%d commit%s" count (if (= count 1) "" "s")))
+
+(defun repo-scan--status-line-word (count)
+  "Return a short status-line count string for COUNT."
+  (format "%d status line%s" count (if (= count 1) "" "s")))
+
+(defun repo-scan--local-only-branch-string (status)
+  "Return compact local-only text for branch STATUS."
+  (format "%s +%d"
+          (plist-get status :branch)
+          (plist-get status :count)))
+
+(defun repo-scan--local-only-text (record)
+  "Return compact local-only branch detail text for RECORD."
+  (let* ((branches (plist-get record :unpushed-branches))
          (shown (seq-take branches 2))
-         (parts (append remote-problems
-                        (mapcar #'repo-scan--branch-drift-string shown))))
+         (parts (mapcar #'repo-scan--local-only-branch-string shown))
+         (total (or (plist-get record :unpushed) 0)))
     (when (> (length branches) (length shown))
       (setq parts (append parts (list (format "+%d more"
                                               (- (length branches)
                                                  (length shown)))))))
-    (string-join parts ", ")))
+    (cond
+     (parts
+      (concat "local-only: " (string-join parts ", ")))
+     ((> total 0)
+      (format "local-only: %s" (repo-scan--commit-word total))))))
+
+(defun repo-scan--drift-text (record)
+  "Return compact branch drift detail text for RECORD."
+  (let* ((branches (repo-scan--problem-branches record))
+         (shown (seq-take branches 2))
+         (parts (mapcar #'repo-scan--branch-drift-string shown)))
+    (when (> (length branches) (length shown))
+      (setq parts (append parts (list (format "+%d more"
+                                              (- (length branches)
+                                                 (length shown)))))))
+    (when parts
+      (concat "drift: " (string-join parts ", ")))))
+
+(defun repo-scan--branches-text (record)
+  "Return compact branch and remote detail text for RECORD."
+  (let ((parts (append (plist-get record :remote-problems)
+                       (plist-get record :siblings)
+                       (delq nil
+                             (list (repo-scan--local-only-text record)
+                                   (repo-scan--drift-text record))))))
+    (string-join parts "; ")))
 
 (defun repo-scan--entry (record)
   "Return tabulated list entry for RECORD."
@@ -712,9 +837,9 @@ CURRENT-BRANCH is used to mark the current row."
            (repo-scan--format-count (plist-get record :ahead))
            (repo-scan--format-count (plist-get record :behind))
            state
-           (repo-scan--branches-text record)
            (propertize (plist-get record :display-path)
-                       'face 'repo-scan-muted-face)))))
+                       'face 'repo-scan-muted-face)
+           (repo-scan--branches-text record)))))
 
 (defun repo-scan--state-rank (record)
   "Return sort rank for RECORD."
@@ -726,11 +851,14 @@ CURRENT-BRANCH is used to mark the current row."
     ("dirty+drift" 3)
     ("dirty" 4)
     ("diverged" 5)
+    ("wip snapshot" 5)
     ("pullable" 6)
     ("pushable" 7)
+    ("wip push" 7)
     ("branch drift" 8)
-    ("unpushed" 9)
+    ("local-only" 9)
     ("scanning" 98)
+    ("expected" 97)
     ("ok" 99)
     (_ 50)))
 
@@ -754,6 +882,7 @@ CURRENT-BRANCH is used to mark the current row."
         (remote-problems 0)
         (pullable 0)
         (pushable 0)
+        (local-only 0)
         (drift 0)
         (scanning 0)
         (errors 0))
@@ -771,16 +900,18 @@ CURRENT-BRANCH is used to mark the current row."
            (setq pullable (1+ pullable)))
          (when (repo-scan--safe-push-p record)
            (setq pushable (1+ pushable)))
+         (when (> (plist-get record :unpushed) 0)
+           (setq local-only (1+ local-only)))
          (when (repo-scan--problem-branches record)
            (setq drift (1+ drift))))))
     (concat
      (format
-      "Repos:%d%s%s  Missing:%d  Remote:%d  Dirty:%d  Pullable:%d  Pushable:%d  Drift:%d"
+      "Repos:%d%s%s  Missing:%d  Remote:%d  Dirty:%d  Pullable:%d  Pushable:%d  Local-only:%d  Drift:%d"
       (length records)
       (if (> scanning 0) (format "  Scanning:%d" scanning) "")
       (if (> errors 0) (format "  Errors:%d" errors) "")
-      missing remote-problems dirty pullable pushable drift)
-     "   RET:vc-dir  j:dired  =:diff  .:rescan  +:pull  P:push  x/X:safe pull  ?:help")))
+      missing remote-problems dirty pullable pushable local-only drift)
+     "   RET:vc-dir  i:info  j:dired  =:diff  .:rescan  +:pull  P:push  x/X:safe pull  ?:help")))
 
 (defun repo-scan--current-position-state (&optional position)
   "Return row state at POSITION, or point when POSITION is nil."
@@ -1319,6 +1450,53 @@ Return the process exit status."
     (message "Fetch started for %d repo(s); press g after it finishes to refresh"
              (length records))))
 
+(defun repo-scan--choose-local-only-branch (record prompt)
+  "Choose a local-only branch from RECORD using PROMPT."
+  (let* ((branches (plist-get record :unpushed-branches))
+         (default (car branches)))
+    (cond
+     ((null branches) nil)
+     ((= (length branches) 1) default)
+     (t
+      (let* ((candidates
+              (mapcar (lambda (branch)
+                        (cons (format "%s (%s)"
+                                      (plist-get branch :branch)
+                                      (repo-scan--commit-word
+                                       (plist-get branch :count)))
+                              branch))
+                      branches))
+             (choice (completing-read prompt candidates nil t
+                                      nil nil
+                                      (caar candidates))))
+        (cdr (assoc choice candidates)))))))
+
+(defun repo-scan--local-only-primary-p (record)
+  "Return non-nil when local-only commits are RECORD's main problem."
+  (and (> (or (plist-get record :unpushed) 0) 0)
+       (or (string= (plist-get record :state) "local-only")
+           (not (repo-scan--problem-branches record)))))
+
+(defun repo-scan--insert-local-only-log (record branch &optional patch)
+  "Insert local-only commit log for RECORD and BRANCH.
+When PATCH is non-nil, include patches."
+  (let* ((dir (repo-scan--record-directory record))
+         (branch-name (plist-get branch :branch))
+         (branch-arg (or branch-name "--branches"))
+         (count (or (plist-get branch :count)
+                    (plist-get record :unpushed))))
+    (insert (format "%s local-only %s\n\n"
+                    (or branch-name "all branches")
+                    (repo-scan--commit-word count)))
+    (insert
+     "These commits are reachable from a local branch but from no remote-tracking ref.\n\n")
+    (repo-scan--insert-git-output
+     dir
+     (append (list "log" "--decorate" "--oneline")
+             (unless patch '("--graph"))
+             (when patch '("--stat" "--patch"))
+             (list branch-arg "--not" "--remotes")))))
+
 (defun repo-scan--choose-branch-status (record prompt)
   "Choose a branch status from RECORD using PROMPT."
   (let* ((statuses (repo-scan--problem-branches record))
@@ -1345,6 +1523,135 @@ Return the process exit status."
                                       nil nil
                                       (car (rassoc default candidates)))))
         (cdr (assoc choice candidates)))))))
+
+(defun repo-scan--status-for-branch (record branch)
+  "Return branch drift status from RECORD for BRANCH, or nil."
+  (seq-find (lambda (status)
+              (equal branch (plist-get status :branch)))
+            (plist-get record :branches)))
+
+(defun repo-scan--branch-advice (status)
+  "Return short next-step advice for branch drift STATUS."
+  (let ((ahead (plist-get status :ahead))
+        (behind (plist-get status :behind))
+        (current (plist-get status :current)))
+    (cond
+     ((and current (= ahead 0) (> behind 0))
+      "Next: press x or + to fast-forward pull if the worktree is clean.")
+     ((and current (> ahead 0) (= behind 0))
+      "Next: press P to push the current branch.")
+     ((and (> ahead 0) (> behind 0))
+      "Next: inspect the log/diff, then rebase, merge, push, or delete the stale local branch manually.")
+     ((> behind 0)
+      "Next: if this branch is still useful, check it out and update it; otherwise delete the local branch.")
+     ((> ahead 0)
+      "Next: push or merge it if the commit matters; otherwise delete the local branch.")
+     (t "Next: no action needed for this branch."))))
+
+(defun repo-scan--insert-local-only-info (record)
+  "Insert local-only commit details for RECORD."
+  (let ((branches (plist-get record :unpushed-branches))
+        (total (or (plist-get record :unpushed) 0)))
+    (when (> total 0)
+      (insert "Local-only commits\n")
+      (insert
+       "Meaning: commits reachable from local branches but from no remote-tracking ref.\n")
+      (insert "Reproduce: git log --branches --not --remotes --oneline --decorate\n")
+      (insert "Inspect: press l here, or run the command above in the repo.\n")
+      (insert
+       "Resolve: push/merge/cherry-pick commits you still need, or delete obsolete local/backup branches.\n\n")
+      (if branches
+          (dolist (branch branches)
+            (let* ((name (plist-get branch :branch))
+                   (status (repo-scan--status-for-branch record name))
+                   (upstream (or (plist-get branch :upstream)
+                                 (and status
+                                      (plist-get status :upstream)))))
+              (insert (format "- %s: %s"
+                              name
+                              (repo-scan--commit-word
+                               (plist-get branch :count))))
+              (when upstream
+                (insert (format ", upstream %s" upstream)))
+              (when status
+                (insert (format ", drift +%d/-%d"
+                                (plist-get status :ahead)
+                                (plist-get status :behind))))
+              (insert "\n")))
+        (insert (format "- %s across local branches\n"
+                        (repo-scan--commit-word total))))
+      (insert "\n"))))
+
+(defun repo-scan--insert-drift-info (record)
+  "Insert branch drift details for RECORD."
+  (let ((branches (repo-scan--problem-branches record)))
+    (when branches
+      (insert "Branch drift\n")
+      (insert
+       "Meaning: local branches differ from their configured or same-named remote branch.\n")
+      (dolist (status branches)
+        (let ((branch (plist-get status :branch))
+              (upstream (plist-get status :upstream))
+              (ahead (plist-get status :ahead))
+              (behind (plist-get status :behind)))
+          (insert (format "- %s -> %s: +%d/-%d%s\n"
+                          branch upstream ahead behind
+                          (if (plist-get status :current)
+                              " (current)"
+                            "")))
+          (insert (format "  Inspect: git log --left-right --graph --decorate --oneline %s...%s\n"
+                          branch upstream))
+          (insert "  " (repo-scan--branch-advice status) "\n")))
+      (insert "\n"))))
+
+(defun repo-scan-info ()
+  "Explain the repository state at point and useful next steps."
+  (interactive)
+  (let* ((record (repo-scan--require-record))
+         (buffer (get-buffer-create repo-scan-info-buffer-name))
+         (kind (plist-get record :kind))
+         (dirty (or (plist-get record :dirty) 0))
+         (remote-problems (plist-get record :remote-problems))
+         (current (repo-scan--current-branch-status record)))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (format "%s\n%s\nState: %s\n\n"
+                        (plist-get record :name)
+                        (plist-get record :display-path)
+                        (plist-get record :state)))
+        (pcase kind
+          ('missing
+           (insert "The manifest path does not exist.\n"))
+          ('non-git
+           (insert "The path exists, but it is not inside a Git repository.\n"))
+          ('git
+           (when remote-problems
+             (insert "Remote problems\n")
+             (dolist (problem remote-problems)
+               (insert "- " problem "\n"))
+             (insert "\n"))
+           (when (> dirty 0)
+             (insert (format "Working tree\n- %s from git status --porcelain\n"
+                             (repo-scan--status-line-word dirty)))
+             (insert "Inspect: press = here, or run git status --short.\n\n"))
+           (when current
+             (insert (format "Current branch\n- %s -> %s: +%d/-%d\n\n"
+                             (plist-get current :branch)
+                             (plist-get current :upstream)
+                             (plist-get current :ahead)
+                             (plist-get current :behind))))
+           (repo-scan--insert-local-only-info record)
+           (repo-scan--insert-drift-info record)
+           (when (and (= dirty 0)
+                      (not remote-problems)
+                      (= (or (plist-get record :unpushed) 0) 0)
+                      (not (repo-scan--problem-branches record)))
+             (insert "No dashboard problems are recorded for this repository.\n")))
+          (_
+           (insert "No additional information is available for this row.\n")))
+        (special-mode)))
+    (pop-to-buffer buffer)))
 
 (defun repo-scan--insert-branch-diff (record status)
   "Insert diff for branch STATUS in RECORD."
@@ -1391,12 +1698,18 @@ Return the process exit status."
           (repo-scan--insert-git-output dir (list "status" "--short"))
           (insert "\n")
           (repo-scan--insert-git-output dir (list "diff" "HEAD" "--")))
+         ((repo-scan--local-only-primary-p record)
+          (repo-scan--insert-local-only-log
+           record
+           (repo-scan--choose-local-only-branch
+            record "Local-only branch: ")
+           t))
          ((repo-scan--problem-branches record)
           (repo-scan--insert-branch-diff
            record
            (repo-scan--choose-branch-status record "Diff branch: ")))
          (t
-          (insert "No dirty files or branch drift.\n")))
+          (insert "No dirty files, local-only commits, or branch drift.\n")))
         (diff-mode)))
     (pop-to-buffer buffer)))
 
@@ -1405,7 +1718,11 @@ Return the process exit status."
   (interactive)
   (let* ((record (repo-scan--require-record))
          (dir (repo-scan--record-directory record))
-         (status (repo-scan--choose-branch-status record "Log branch: "))
+         (local-only (and (repo-scan--local-only-primary-p record)
+                          (repo-scan--choose-local-only-branch
+                           record "Local-only branch: ")))
+         (status (unless local-only
+                   (repo-scan--choose-branch-status record "Log branch: ")))
          (branch (or (plist-get status :branch)
                      (and (repo-scan--current-branch-status record)
                           (plist-get (repo-scan--current-branch-status record)
@@ -1419,13 +1736,17 @@ Return the process exit status."
         (insert (format "%s\n%s\n\n"
                         (plist-get record :name)
                         (plist-get record :display-path)))
-        (if upstream
-            (repo-scan--insert-git-output
-             dir (list "log" "--left-right" "--graph" "--decorate" "--oneline"
-                       (format "%s...%s" branch upstream)))
+        (cond
+         (local-only
+          (repo-scan--insert-local-only-log record local-only))
+         (upstream
+          (repo-scan--insert-git-output
+           dir (list "log" "--left-right" "--graph" "--decorate" "--oneline"
+                     (format "%s...%s" branch upstream))))
+         (t
           (repo-scan--insert-git-output
            dir (list "log" "--graph" "--decorate" "--oneline" "-n" "80"
-                     branch)))
+                     branch))))
         (special-mode)))
     (pop-to-buffer buffer)))
 
@@ -1493,34 +1814,279 @@ sources."
 
 ;;; Bulk safe action
 
-(defun repo-scan--safe-pull-records (records)
-  "Return records from RECORDS eligible for a default safe pull."
-  (seq-filter #'repo-scan--safe-pull-p records))
-
-(defun repo-scan--run-safe-pulls (records)
-  "Run fast-forward pulls for RECORDS."
-  (let ((eligible (repo-scan--safe-pull-records records)))
-    (unless eligible
-      (user-error "No safe pulls available"))
-    (when (yes-or-no-p
-           (format "Run git pull --ff-only in %d repo(s)? " (length eligible)))
-      (repo-scan--run-shell-command
-       eligible
-       (concat repo-scan-git-program " pull --ff-only")
-       nil)
-      (repo-scan-refresh))))
-
 (defun repo-scan-execute-safe ()
-  "Execute the default safe action on marked repos, or current repo.
-The default safe action is a fast-forward pull on clean current branches
-that are behind their upstream and not ahead."
+  "Execute the pending safe sync action on marked repos, or current repo.
+Depending on each repository's sync policy (see
+`repo-scan-sync-policies'), the safe action is a fast-forward
+pull, a push of a cleanly-ahead current branch, or a wip
+snapshot-and-push."
   (interactive)
-  (repo-scan--run-safe-pulls (repo-scan--records-for-action)))
+  (repo-scan--execute-sync-actions (repo-scan--records-for-action)))
 
 (defun repo-scan-execute-safe-all ()
-  "Execute the default safe action on all eligible repositories."
+  "Execute the pending safe sync action on all eligible repositories."
   (interactive)
-  (repo-scan--run-safe-pulls repo-scan--records))
+  (repo-scan--execute-sync-actions repo-scan--records))
+
+;;; Sync policies (wrap-up)
+
+(defcustom repo-scan-sync-policies nil
+  "Alist mapping repositories to sync policies.
+Each key is a repository path (tilde allowed) or a bare repository
+name.  Each value is one of:
+
+- `origin' -- a normal repository: the dashboard expects it clean and
+  `repo-scan-execute-safe' pushes branches that are ahead of
+  their upstream and cleanly fast-forwardable.
+- `wip', or (wip . REMOTE) -- a working repository:
+  `repo-scan-execute-safe' snapshot-commits any uncommitted
+  changes and force-pushes the current branch to
+  NAMESPACE/BRANCH on REMOTE (default \"wip\"); see
+  `repo-scan-wip-namespace'.
+- `ignore' -- expected to be dirty or diverged: shown as \"expected\"
+  and never acted on.
+
+Repositories not listed default to `origin'.  Manifest lines can also
+set the policy with a field of the form sync=origin, sync=wip,
+sync=wip:REMOTE, or sync=ignore."
+  :type '(alist :key-type string :value-type sexp)
+  :group 'repo-scan)
+
+(defcustom repo-scan-wip-namespace 'system-name
+  "Namespace for branches pushed by wip-policy sync.
+When non-nil, wip-policy sync pushes branch BRANCH to NAMESPACE/BRANCH
+on the wip remote instead of BRANCH, so that machines sharing a remote
+never write to each other's refs and the forced push can only
+overwrite this machine's own previous snapshot.  The value is a
+string, or the symbol `system-name' to use a sanitized `system-name'.
+Set to nil to push to the unqualified branch name (only safe when a
+single machine pushes to the remote)."
+  :type '(choice (const :tag "Machine name" system-name)
+                 (string :tag "Fixed namespace")
+                 (const :tag "None (single machine only)" nil))
+  :group 'repo-scan)
+
+(defcustom repo-scan-snapshot-message-function
+  #'repo-scan-default-snapshot-message
+  "Function returning the commit message for wip snapshot commits.
+Called with the repository record."
+  :type 'function
+  :group 'repo-scan)
+
+(defun repo-scan-default-snapshot-message (_record)
+  "Return the default wip snapshot commit message."
+  (format-time-string "; wip snapshot %F %R"))
+
+(defun repo-scan--parse-sync-token (token)
+  "Return a sync policy for manifest TOKEN, or nil if unrecognized."
+  (pcase token
+    ("origin" 'origin)
+    ("ignore" 'ignore)
+    ("wip" 'wip)
+    ((pred (string-prefix-p "wip:"))
+     (cons 'wip (substring token (length "wip:"))))
+    (_ nil)))
+
+(defun repo-scan--sync-policy (record)
+  "Return normalized sync policy (SYMBOL . REMOTE) for RECORD."
+  (let ((raw (or (plist-get record :sync-policy)
+                 (cdr (seq-find
+                       (lambda (cell)
+                         (let ((key (car cell)))
+                           (or (equal key (plist-get record :name))
+                               (and (string-match-p "/" key)
+                                    (file-exists-p
+                                     (repo-scan--expand-path key))
+                                    (file-equal-p
+                                     (repo-scan--expand-path key)
+                                     (plist-get record :path))))))
+                       repo-scan-sync-policies)))))
+    (pcase raw
+      ('ignore '(ignore . nil))
+      ('wip '(wip . "wip"))
+      (`(wip . ,remote) (cons 'wip remote))
+      (_ '(origin . nil)))))
+
+(defun repo-scan--wip-namespace ()
+  "Return the effective wip namespace string, or nil."
+  (pcase repo-scan-wip-namespace
+    ('system-name
+     (let ((name (downcase (car (split-string (system-name) "\\.")))))
+       (replace-regexp-in-string "[^a-z0-9-]" "-" name)))
+    ((and (pred stringp) name) name)
+    (_ nil)))
+
+(defun repo-scan--wip-target (branch)
+  "Return the namespaced wip target ref name for BRANCH."
+  (let ((namespace (repo-scan--wip-namespace)))
+    (if namespace (format "%s/%s" namespace branch) branch)))
+
+(defun repo-scan--git-status-output (dir &rest args)
+  "Run Git in DIR with ARGS; return (EXIT-STATUS . OUTPUT)."
+  (with-temp-buffer
+    (let ((status (apply #'process-file
+                         repo-scan-git-program nil t nil
+                         "-C" dir args)))
+      (cons status (string-trim (buffer-string))))))
+
+(defun repo-scan--wip-scan-extras (dir branch remote)
+  "Return wip scan info for DIR's BRANCH against REMOTE.
+Returns a plist with :wip-push (non-nil when the namespaced remote ref
+is missing or behind BRANCH) and :siblings (strings describing other
+namespaces' refs holding commits absent from BRANCH).  Uses existing
+remote-tracking refs; fetch (\\[repo-scan-fetch-all]) to refresh
+them."
+  (let* ((target (repo-scan--wip-target branch))
+         (remote-ref (format "%s/%s" remote target))
+         (has-ref (repo-scan--git-success-p
+                   dir "rev-parse" "--verify" "--quiet" remote-ref))
+         (ahead (and has-ref
+                     (car (repo-scan--ahead-behind
+                           dir branch remote-ref))))
+         (namespace (repo-scan--wip-namespace))
+         siblings)
+    (dolist (ref (repo-scan--git-lines
+                  dir "for-each-ref" "--format=%(refname:short)"
+                  (format "refs/remotes/%s/*/%s" remote branch)))
+      (let ((sibling-ns
+             (and (string-prefix-p (concat remote "/") ref)
+                  (string-suffix-p (concat "/" branch) ref)
+                  (substring ref (1+ (length remote))
+                             (- (length ref) (1+ (length branch)))))))
+        (when (and sibling-ns
+                   (not (string-empty-p sibling-ns))
+                   (not (equal sibling-ns namespace)))
+          (let ((missing (cdr (repo-scan--ahead-behind
+                               dir branch ref))))
+            (when (and missing (> missing 0))
+              (push (format "%s +%d" sibling-ns missing) siblings))))))
+    (list :wip-push (or (not has-ref) (> (or ahead 0) 0))
+          :siblings (nreverse siblings))))
+
+(defun repo-scan--snapshot-commit (record)
+  "Snapshot-commit uncommitted changes in RECORD.
+Return a result string, or nil when the commit failed."
+  (let ((dir (plist-get record :path))
+        (message (funcall repo-scan-snapshot-message-function record)))
+    (and (repo-scan--git-success-p dir "add" "-A")
+         (repo-scan--git-success-p dir "commit" "-m" message)
+         (format "snapshot committed (%s)" message))))
+
+(defun repo-scan--wip-sync (record remote)
+  "Fetch, snapshot and push RECORD's current branch to REMOTE.
+Return (t . MESSAGE) on success, (nil . MESSAGE) on failure."
+  (let* ((dir (plist-get record :path))
+         (branch (plist-get record :branch))
+         (target (repo-scan--wip-target branch)))
+    (cond
+     ((not (repo-scan--git-success-p dir "fetch" remote))
+      (cons nil (format "fetch from %s failed" remote)))
+     ((and (> (repo-scan--dirty-count dir) 0)
+           (not (repo-scan--snapshot-commit record)))
+      (cons nil "snapshot commit failed"))
+     (t
+      (let ((result (repo-scan--git-status-output
+                     dir "push"
+                     (format "--force-with-lease=refs/heads/%s" target)
+                     remote
+                     (format "%s:refs/heads/%s" branch target))))
+        (if (zerop (car result))
+            (cons t (format "pushed %s to %s/%s" branch remote target))
+          (cons nil (cdr result))))))))
+
+(defun repo-scan--origin-push (record)
+  "Push RECORD's current branch to its upstream.
+Return (t . MESSAGE) on success, (nil . MESSAGE) on failure."
+  (let* ((dir (plist-get record :path))
+         (current (repo-scan--current-branch-status record))
+         (branch (plist-get current :branch))
+         (upstream (plist-get current :upstream))
+         (remote (car (split-string upstream "/")))
+         (result (repo-scan--git-status-output
+                  dir "push" remote branch)))
+    (if (zerop (car result))
+        (cons t (format "pushed %s to %s" branch upstream))
+      (cons nil (cdr result)))))
+
+(defun repo-scan--sync-action (record)
+  "Return the pending sync action symbol for RECORD, or nil.
+One of `pull', `push' or `wip-sync'."
+  (when (eq (plist-get record :kind) 'git)
+    (pcase-let ((`(,policy . ,_remote) (repo-scan--sync-policy record)))
+      (pcase policy
+        ('ignore nil)
+        ('wip (and (or (> (plist-get record :dirty) 0)
+                       (plist-get record :wip-push))
+                   'wip-sync))
+        (_ (cond
+            ((repo-scan--safe-pull-p record) 'pull)
+            ((repo-scan--safe-push-p record) 'push)))))))
+
+(defun repo-scan--execute-sync-actions (records)
+  "Execute pending sync actions for RECORDS, reporting a receipt."
+  (let* ((dashboard (current-buffer))
+         (actionable (seq-filter #'repo-scan--sync-action records))
+         (summary (mapconcat
+                   (lambda (kind)
+                     (let ((n (seq-count
+                               (lambda (r)
+                                 (eq (repo-scan--sync-action r) kind))
+                               actionable)))
+                       (and (> n 0) (format "%s %d" kind n))))
+                   '(pull push wip-sync) " ")))
+    (unless actionable
+      (user-error "No safe sync actions available"))
+    (when (yes-or-no-p (format "Sync (%s repo(s): %s)? "
+                               (length actionable) (string-trim summary)))
+      (let (failures)
+        (dolist (record actionable)
+          (let* ((action (repo-scan--sync-action record))
+                 (result
+                  (pcase action
+                    ('pull (repo-scan--git-status-output
+                            (plist-get record :path) "pull" "--ff-only"))
+                    ('push (repo-scan--origin-push record))
+                    ('wip-sync
+                     (repo-scan--wip-sync
+                      record
+                      (cdr (repo-scan--sync-policy record))))))
+                 (ok (pcase action
+                       ('pull (zerop (car result)))
+                       (_ (car result)))))
+            (unless ok
+              (push (format "%s: %s" (plist-get record :name) (cdr result))
+                    failures))
+            (repo-scan--rescan-record record dashboard)))
+        (if failures
+            (message "Sync finished with failures: %s"
+                     (string-join (nreverse failures) " | "))
+          (message "Sync finished: %s" (string-trim summary)))))))
+
+(defun repo-scan-outgoing-log ()
+  "Show the log of commits that a sync would push for the repo at point."
+  (interactive)
+  (let* ((record (repo-scan--require-record))
+         (branch (plist-get record :branch))
+         (range
+          (pcase-let ((`(,policy . ,remote)
+                       (repo-scan--sync-policy record)))
+            (pcase policy
+              ('wip
+               (let ((remote-ref (format "%s/%s" remote
+                                         (repo-scan--wip-target branch))))
+                 (if (repo-scan--git-success-p
+                      (plist-get record :path)
+                      "rev-parse" "--verify" "--quiet" remote-ref)
+                     (format "%s..%s" remote-ref branch)
+                   branch)))
+              (_
+               (let ((current (repo-scan--current-branch-status record)))
+                 (if (and current (plist-get current :upstream))
+                     (format "%s..%s" (plist-get current :upstream) branch)
+                   branch)))))))
+    (repo-scan--display-git-command
+     record repo-scan-log-buffer-name
+     "log" "--stat" range)))
 
 ;;; Shell commands
 
@@ -1639,6 +2205,7 @@ output lines with the repository name."
     (define-key map (kbd "g") #'repo-scan-refresh)
     (define-key map (kbd ".") #'repo-scan-refresh-at-point)
     (define-key map (kbd "RET") #'repo-scan-vc-dir)
+    (define-key map (kbd "i") #'repo-scan-info)
     (define-key map (kbd "j") #'repo-scan-dired)
     (define-key map (kbd "A") #'repo-scan-search)
     (define-key map (kbd "C-x g") #'repo-scan-magit-status)
@@ -1655,6 +2222,7 @@ output lines with the repository name."
     (define-key map (kbd "*") repo-scan-mark-map)
     (define-key map (kbd "x") #'repo-scan-execute-safe)
     (define-key map (kbd "X") #'repo-scan-execute-safe-all)
+    (define-key map (kbd "o") #'repo-scan-outgoing-log)
     (define-key map (kbd "!") #'repo-scan-shell-command)
     (define-key map (kbd "&") #'repo-scan-async-shell-command)
     (define-key map (kbd "?") #'describe-mode)
@@ -1674,8 +2242,8 @@ output lines with the repository name."
          ("A" 4 tabulated-list-entry-size->)
          ("B" 4 tabulated-list-entry-size->)
          ("State" 16 t)
-         ("Details" 30 t)
-         ("Path" 0 t)])
+         ("Path" 30 t)
+         ("Details" 0 t)])
   (setq tabulated-list-padding 2)
   (setq tabulated-list-sort-key nil)
   (add-hook 'tabulated-list-revert-hook #'repo-scan-refresh nil t)

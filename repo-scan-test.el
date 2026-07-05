@@ -54,6 +54,23 @@
   (should-not (repo-scan--parse-manifest-line "" "/tmp/repos.manifest"))
   (should-not (repo-scan--parse-manifest-line "  # comment" "/tmp/repos.manifest")))
 
+(ert-deftest repo-scan-collect-descriptors-normalizes-custom-sources ()
+  (let* ((dir (make-temp-file "repo-scan-test" t))
+         (repo-scan--source-functions
+          (list (lambda ()
+                  (list (list :path dir
+                              :group "custom"
+                              :source 'test-source))))))
+    (unwind-protect
+        (let ((repo (car (repo-scan--collect-descriptors))))
+          (should (equal (plist-get repo :path) dir))
+          (should (equal (plist-get repo :name)
+                         (file-name-nondirectory
+                          (directory-file-name dir))))
+          (should (stringp (plist-get repo :display-path)))
+          (should (equal (plist-get repo :group) "custom")))
+      (delete-directory dir t))))
+
 (ert-deftest repo-scan-normalize-url ()
   (should (equal (repo-scan--normalize-url "git@github.com:user/repo.git")
                  "github.com/user/repo"))
@@ -147,7 +164,7 @@
                         :dirty 0
                         :unpushed 2
                         :branches nil))
-                 "unpushed"))
+                 "local-only"))
   (should (equal (repo-scan--record-state
                   (list :kind 'git
                         :dirty 0
@@ -173,7 +190,26 @@
                                             :ahead 0
                                             :behind 3)))))
     (should (equal (repo-scan--branches-text record)
-                   "a +1, b -2, +1 more"))))
+                   "drift: a +1, b -2, +1 more"))))
+
+(ert-deftest repo-scan-branches-text-prioritizes-local-only ()
+  (let ((record (list :unpushed 2
+                      :unpushed-branches
+                      (list (list :branch "topic-a" :count 1)
+                            (list :branch "topic-b" :count 1))
+                      :branches (list (list :branch "old"
+                                            :ahead 0
+                                            :behind 2)))))
+    (should (equal (repo-scan--branches-text record)
+                   "local-only: topic-a +1, topic-b +1; drift: old -2"))))
+
+(ert-deftest repo-scan-details-column-expands ()
+  (with-temp-buffer
+    (repo-scan-mode)
+    (let ((last-column (aref tabulated-list-format
+                             (1- (length tabulated-list-format)))))
+      (should (equal (nth 0 last-column) "Details"))
+      (should (= (nth 1 last-column) 0)))))
 
 (ert-deftest repo-scan-remote-problems ()
   (let ((dir (make-temp-file "repo-scan-test" t)))
