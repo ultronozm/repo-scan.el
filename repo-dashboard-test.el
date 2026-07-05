@@ -54,6 +54,23 @@
   (should-not (repo-dashboard--parse-manifest-line "" "/tmp/repos.manifest"))
   (should-not (repo-dashboard--parse-manifest-line "  # comment" "/tmp/repos.manifest")))
 
+(ert-deftest repo-dashboard-collect-descriptors-normalizes-custom-sources ()
+  (let* ((dir (make-temp-file "repo-dashboard-test" t))
+         (repo-dashboard--source-functions
+          (list (lambda ()
+                  (list (list :path dir
+                              :group "custom"
+                              :source 'test-source))))))
+    (unwind-protect
+        (let ((repo (car (repo-dashboard--collect-descriptors))))
+          (should (equal (plist-get repo :path) dir))
+          (should (equal (plist-get repo :name)
+                         (file-name-nondirectory
+                          (directory-file-name dir))))
+          (should (stringp (plist-get repo :display-path)))
+          (should (equal (plist-get repo :group) "custom")))
+      (delete-directory dir t))))
+
 (ert-deftest repo-dashboard-normalize-url ()
   (should (equal (repo-dashboard--normalize-url "git@github.com:user/repo.git")
                  "github.com/user/repo"))

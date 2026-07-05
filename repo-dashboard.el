@@ -209,6 +209,24 @@ When nil, use `repo-dashboard-sources'.")
            :name (repo-dashboard--repo-name expanded))
      props)))
 
+(defun repo-dashboard--normalize-descriptor (descriptor)
+  "Return DESCRIPTOR with the display fields required by the dashboard."
+  (let ((path (plist-get descriptor :path)))
+    (unless (stringp path)
+      (error "Repository descriptor missing string :path: %S" descriptor))
+    (let* ((expanded (repo-dashboard--expand-path path))
+           (normalized (copy-sequence descriptor)))
+      (setq normalized (plist-put normalized :path expanded))
+      (unless (plist-get normalized :display-path)
+        (setq normalized
+              (plist-put normalized :display-path
+                         (repo-dashboard--short-path expanded))))
+      (unless (plist-get normalized :name)
+        (setq normalized
+              (plist-put normalized :name
+                         (repo-dashboard--repo-name expanded))))
+      normalized)))
+
 (defun repo-dashboard--parse-manifest-line (line source)
   "Parse manifest LINE from SOURCE.
 Return nil for comments and blank lines."
@@ -294,8 +312,9 @@ Return nil for comments and blank lines."
         (sources (or repo-dashboard--source-functions repo-dashboard-sources))
         repos)
     (dolist (source sources)
-      (dolist (repo (funcall source))
-        (let ((key (file-truename (plist-get repo :path))))
+      (dolist (raw (funcall source))
+        (let* ((repo (repo-dashboard--normalize-descriptor raw))
+               (key (file-truename (plist-get repo :path))))
           (unless (gethash key seen)
             (puthash key t seen)
             (push repo repos)))))
