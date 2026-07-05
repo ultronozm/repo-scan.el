@@ -33,9 +33,9 @@
 ;;   ~/work/project git@github.com:user/project.git
 ;;
 ;; Comments and blank lines are ignored.  A third field may name an
-;; extra remote as NAME=URL; a field of the form sync=POLICY sets the
-;; repository's sync policy (see `repo-scan-sync-policies');
-;; other extra fields are ignored.
+;; extra remote as NAME=URL; fields of the form sync=POLICY and
+;; expected-local=BRANCH[,BRANCH...] set the repository's sync policy
+;; and expected local-only branches; other extra fields are ignored.
 ;;
 ;; The dashboard is opened with M-x repo-scan.  Sync policies make
 ;; the usual dashboard flow double as an end-of-session sync: the
@@ -259,8 +259,19 @@ Return nil for comments and blank lines."
              (sync (seq-find (lambda (field)
                                (string-prefix-p "sync=" field))
                              rest))
+             (expected-local
+              (apply #'append
+                     (mapcar (lambda (field)
+                               (if (string-prefix-p "expected-local=" field)
+                                   (repo-scan--split-comma-list
+                                    (substring field
+                                               (length "expected-local=")))
+                                 nil))
+                             rest)))
              (extra (seq-find (lambda (field)
-                                (not (string-prefix-p "sync=" field)))
+                                (not (or (string-prefix-p "sync=" field)
+                                         (string-prefix-p
+                                          "expected-local=" field))))
                               rest)))
         (when path
           (repo-scan--descriptor
@@ -270,6 +281,7 @@ Return nil for comments and blank lines."
            :sync-policy (and sync
                              (repo-scan--parse-sync-token
                               (substring sync (length "sync="))))
+           :expected-local-branches expected-local
            :group "manifest"
            :source source))))))
 
@@ -456,6 +468,20 @@ Return nil for comments and blank lines."
   (equal (repo-scan--normalize-url actual)
          (repo-scan--normalize-url expected)))
 
+(defun repo-scan--split-comma-list (text)
+  "Split comma-separated TEXT into nonempty trimmed strings."
+  (seq-filter (lambda (item) (not (string-empty-p item)))
+              (mapcar #'string-trim (split-string text ","))))
+
+(defun repo-scan--record-key-matches-p (key record)
+  "Return non-nil when KEY names RECORD.
+KEY may be a bare repository name or an existing path."
+  (or (equal key (plist-get record :name))
+      (and (string-match-p "/" key)
+           (file-exists-p (repo-scan--expand-path key))
+           (file-equal-p (repo-scan--expand-path key)
+                         (plist-get record :path)))))
+
 (defun repo-scan--extra-remote-parts (extra)
   "Return (NAME URL) parsed from EXTRA, or nil."
   (when (and extra (string-match "\\`\\([^=]+\\)=\\(.+\\)\\'" extra))
@@ -511,6 +537,16 @@ Return nil for comments and blank lines."
   (repo-scan--count-lines
    (repo-scan--git-string dir "log" "--branches" "--not" "--remotes" "--oneline")))
 
+(defun repo-scan--unpushed-count-for-branches (dir branches)
+  "Return count of unique local-only commits reachable from BRANCHES in DIR."
+  (if branches
+      (string-to-number
+       (or (apply #'repo-scan--git-string
+                  dir "rev-list" "--count"
+                  (append branches (list "--not" "--remotes")))
+           "0"))
+    0))
+
 (defun repo-scan--unpushed-branch-count (dir branch)
   "Return count of commits on BRANCH in DIR but on no remote."
   (string-to-number
@@ -518,13 +554,27 @@ Return nil for comments and blank lines."
         dir "rev-list" "--count" branch "--not" "--remotes")
        "0")))
 
-(defun repo-scan--unpushed-branches (dir current-branch)
-  "Return local branches in DIR with commits not on any remote."
+(defun repo-scan--local-branch-names (dir)
+  "Return local branch names in DIR."
+  (mapcar (lambda (line) (car (split-string line "\t")))
+          (repo-scan--local-branch-lines dir)))
+
+(defun repo-scan--included-local-branches (dir expected-local-branches)
+  "Return local branches in DIR except EXPECTED-LOCAL-BRANCHES."
+  (seq-remove (lambda (branch)
+                (member branch expected-local-branches))
+              (repo-scan--local-branch-names dir)))
+
+(defun repo-scan--unpushed-branches
+    (dir current-branch &optional expected-local-branches)
+  "Return local branches in DIR with commits not on any remote.
+EXPECTED-LOCAL-BRANCHES are omitted from the result."
   (let (branches)
     (dolist (line (repo-scan--local-branch-lines dir))
       (pcase-let* ((`(,branch ,upstream) (split-string line "\t"))
                    (count (repo-scan--unpushed-branch-count dir branch)))
-        (when (> count 0)
+        (when (and (> count 0)
+                   (not (member branch expected-local-branches)))
           (push (list :branch branch
                       :upstream (and upstream
                                      (not (string-empty-p upstream))
@@ -704,8 +754,14 @@ CURRENT-BRANCH is used to mark the current row."
      (t
       (let* ((branch (repo-scan--current-branch root))
              (branches (repo-scan--branch-statuses root branch))
+             (expected-local-branches
+              (repo-scan--expected-local-branches base))
+             (included-local-branches
+              (repo-scan--included-local-branches
+               root expected-local-branches))
              (unpushed-branches
-              (repo-scan--unpushed-branches root branch))
+              (repo-scan--unpushed-branches
+               root branch expected-local-branches))
              (record (repo-scan--plist-merge
                       base
                       :kind 'git
@@ -718,8 +774,12 @@ CURRENT-BRANCH is used to mark the current row."
                       :remote-problems
                       (repo-scan--remote-problems root descriptor)
                       :dirty (repo-scan--dirty-count root)
-                      :unpushed (repo-scan--unpushed-count root)
+                      :unpushed
+                      (repo-scan--unpushed-count-for-branches
+                       root included-local-branches)
                       :unpushed-branches unpushed-branches
+                      :expected-local-branches
+                      expected-local-branches
                       :branches branches)))
         (setq record (plist-put record :ahead
                                 (repo-scan--record-ahead record)))
@@ -1852,6 +1912,19 @@ sync=wip:REMOTE, or sync=ignore."
   :type '(alist :key-type string :value-type sexp)
   :group 'repo-scan)
 
+(defcustom repo-scan-expected-local-branches nil
+  "Alist mapping repositories to expected local-only branches.
+Each key is a repository path (tilde allowed) or a bare repository
+name.  Each value is a list of branch names whose local-only commits
+should not make the repository show as \"local-only\".
+
+Use this for generated or deliberately machine-local branches.  It
+does not hide dirty working trees, branch drift, or local-only commits
+on other branches.  Manifest lines can also set this with a field of
+the form expected-local=BRANCH[,BRANCH...]."
+  :type '(alist :key-type string :value-type (repeat string))
+  :group 'repo-scan)
+
 (defcustom repo-scan-wip-namespace 'system-name
   "Namespace for branches pushed by wip-policy sync.
 When non-nil, wip-policy sync pushes branch BRANCH to NAMESPACE/BRANCH
@@ -1906,6 +1979,18 @@ Called with the repository record."
       ('wip '(wip . "wip"))
       (`(wip . ,remote) (cons 'wip remote))
       (_ '(origin . nil)))))
+
+(defun repo-scan--expected-local-branches (record)
+  "Return branch names expected to be local-only for RECORD."
+  (let ((configured
+         (cdr (seq-find
+               (lambda (cell)
+                 (repo-scan--record-key-matches-p (car cell) record))
+               repo-scan-expected-local-branches))))
+    (delete-dups
+     (copy-sequence
+      (append (plist-get record :expected-local-branches)
+              configured)))))
 
 (defun repo-scan--wip-namespace ()
   "Return the effective wip namespace string, or nil."

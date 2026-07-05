@@ -16,10 +16,11 @@ Customize =repo-scan-manifest-files= to specify your manifest files, e.g.:
 (setopt repo-scan-manifest-files '("~/dotfiles/repos.manifest"))
 #+end_src
 
-Each non-comment line of each manifest file should begin with a path and origin URL.  Blank lines and lines starting with =#= are ignored.  A third field may specify an extra remote as =NAME=URL=.  Extra fields are ignored.  Example:
+Each non-comment line of each manifest file should begin with a path and origin URL.  Blank lines and lines starting with =#= are ignored.  A third field may specify an extra remote as =NAME=URL=.  Additional fields can set scan policy, such as =sync=wip= or =expected-local=working=.  Extra fields are ignored.  Example:
 #+begin_example
 ~/work/example git@github.com:user/example.git
 ~/work/fork git@github.com:user/fork.git upstream=https://github.com/upstream/fork.git
+~/work/emacs git://git.sv.gnu.org/emacs.git wip=git@github.com:user/emacs-wip.git expected-local=working
 #+end_example
 
 * Customization
@@ -35,6 +36,8 @@ Each non-comment line of each manifest file should begin with a path and origin 
 | =repo-scan-refresh-concurrency= | Maximum number of async scan subprocesses |
 | =repo-scan-git-program= | Git executable |
 | =repo-scan-fetch-arguments= | Git arguments used by =repo-scan-fetch= |
+| =repo-scan-sync-policies= | Per-repository sync policy for safe actions |
+| =repo-scan-expected-local-branches= | Per-repository generated/local branches omitted from local-only counts |
 | =repo-scan-buffer-name= | Dashboard buffer name |
 | =repo-scan-command-buffer-name= | Shell command output buffer name |
 | =repo-scan-diff-buffer-name= | Diff buffer name |

@@ -43,6 +43,15 @@
                    "git@github.com:user/example.git"))
     (should-not (plist-get repo :extra-remote))))
 
+(ert-deftest repo-scan-parse-manifest-expected-local ()
+  (let ((repo (repo-scan--parse-manifest-line
+               "~/work/example git@github.com:user/example.git upstream=https://example.invalid/x.git expected-local=working,scratch"
+               "/tmp/repos.manifest")))
+    (should (equal (plist-get repo :extra-remote)
+                   "upstream=https://example.invalid/x.git"))
+    (should (equal (plist-get repo :expected-local-branches)
+                   '("working" "scratch")))))
+
 (ert-deftest repo-scan-parse-manifest-path-only ()
   (let ((repo (repo-scan--parse-manifest-line
                "~/work/example"
@@ -227,6 +236,50 @@
                     dir (list :origin "https://github.com/other/repo.git"))
                    '("origin mismatch"))))
       (delete-directory dir t))))
+
+(ert-deftest repo-scan-expected-local-branches-do-not-count-as-local-only ()
+  (let ((dir (make-temp-file "repo-scan-test" t))
+        (remote (make-temp-file "repo-scan-remote" t)))
+    (unwind-protect
+        (progn
+          (should (repo-scan--git-success-p dir "init" "-b" "main"))
+          (should (repo-scan--git-success-p dir "config" "user.email"
+                                            "repo-scan@example.invalid"))
+          (should (repo-scan--git-success-p dir "config" "user.name"
+                                            "Repo Scan Test"))
+          (should (repo-scan--git-success-p remote "init" "--bare"))
+          (with-temp-file (expand-file-name "file.txt" dir)
+            (insert "base\n"))
+          (should (repo-scan--git-success-p dir "add" "file.txt"))
+          (should (repo-scan--git-success-p dir "commit" "-m" "base"))
+          (should (repo-scan--git-success-p dir "remote" "add" "origin"
+                                            remote))
+          (should (repo-scan--git-success-p dir "push" "-u" "origin"
+                                            "main"))
+          (should (repo-scan--git-success-p dir "checkout" "-b" "working"))
+          (with-temp-file (expand-file-name "working.txt" dir)
+            (insert "generated\n"))
+          (should (repo-scan--git-success-p dir "add" "working.txt"))
+          (should (repo-scan--git-success-p dir "commit" "-m" "working"))
+          (should (repo-scan--git-success-p dir "checkout" "main"))
+          (should (repo-scan--git-success-p dir "checkout" "-b" "topic"))
+          (with-temp-file (expand-file-name "topic.txt" dir)
+            (insert "real topic\n"))
+          (should (repo-scan--git-success-p dir "add" "topic.txt"))
+          (should (repo-scan--git-success-p dir "commit" "-m" "topic"))
+          (should (repo-scan--git-success-p dir "checkout" "main"))
+          (let* ((record (repo-scan--scan
+                          (repo-scan--descriptor
+                           dir :expected-local-branches '("working"))))
+                 (branches (plist-get record :unpushed-branches)))
+            (should (= (plist-get record :unpushed) 1))
+            (should (equal (mapcar (lambda (branch)
+                                     (plist-get branch :branch))
+                                   branches)
+                           '("topic")))
+            (should (equal (plist-get record :state) "local-only"))))
+      (delete-directory dir t)
+      (delete-directory remote t))))
 
 (ert-deftest repo-scan-refresh-async-populates-records ()
   (let ((dir (make-temp-file "repo-scan-test" t)))
