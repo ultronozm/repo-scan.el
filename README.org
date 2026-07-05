@@ -1,0 +1,121 @@
+#+title: repo-dashboard.el: Dired-like dashboard for Git repo manifests
+#+author: Paul Nelson
+
+=repo-dashboard= is a small Emacs package for managing a personal collection of
+Git repositories from one buffer.
+
+The main command is =M-x repo-dashboard=.  It reads one or more manifest files,
+starts asynchronous Git-state scans for each repository, and displays a
+tabulated dashboard with dirty, ahead, behind, missing, stale-branch, and
+remote-mismatch information as rows finish.
+
+* Manifest format
+
+Customize =repo-dashboard-manifest-files= to specify your manifest files, e.g.:
+#+begin_src elisp
+(setopt repo-dashboard-manifest-files '("~/dotfiles/repos.manifest"))
+#+end_src
+
+Each non-comment line of each manifest file should begin with a path and origin URL.  Blank lines and lines starting with =#= are ignored.  A third field may specify an extra remote as =NAME=URL=.  Extra fields are ignored.  Example:
+#+begin_example
+~/work/example git@github.com:user/example.git
+~/work/fork git@github.com:user/fork.git upstream=https://github.com/upstream/fork.git
+#+end_example
+
+* Customization
+
+| Variable | Purpose |
+|----------+---------|
+| =repo-dashboard-manifest-files= | Manifest files read by the default source |
+| =repo-dashboard-sources= | Source functions that return repository descriptors |
+| =repo-dashboard-extra-roots= | One-level Git repository roots for the extra-roots source |
+| =repo-dashboard-emacs-package-roots= | One-level package clone roots for the Emacs package source |
+| =repo-dashboard-refresh-concurrency= | Maximum number of async scan subprocesses |
+| =repo-dashboard-git-program= | Git executable |
+| =repo-dashboard-fetch-arguments= | Git arguments used by =repo-dashboard-fetch= |
+| =repo-dashboard-buffer-name= | Dashboard buffer name |
+| =repo-dashboard-command-buffer-name= | Shell command output buffer name |
+| =repo-dashboard-diff-buffer-name= | Diff buffer name |
+| =repo-dashboard-log-buffer-name= | Log buffer name |
+
+* Example configuration
+
+Here is a complete example config using [[https://github.com/progfolio/elpaca][elpaca]]:
+
+#+begin_src emacs-lisp
+(use-package repo-dashboard
+  :ensure (:host github :repo "ultronozm/repo-dashboard.el")
+  :defer t
+  :custom
+  (repo-dashboard-manifest-files '("~/dotfiles/repos.manifest")))
+#+end_src
+
+* Usage
+
+In the dashboard:
+
+| Key   | Command |
+|-------+---------|
+| =n=, =p= | Move to next/previous repository |
+| =g= | Refresh all repository state |
+| =.= | Rescan the repository at point, or all marked repos |
+| =RET= | Open =vc-dir= for the repository |
+| =j= | Open Dired at the repository root |
+| =C-x g= | Open Magit status for the repository, when Magit is available |
+| ~=~ | Show a useful diff for the repository |
+| =l= | Show a compact Git log for the current or selected drift branch |
+| =f= | Fetch all remotes for the current repository |
+| =F= | Fetch all remotes for all known repositories asynchronously |
+| =+= | Open/reuse =vc-dir= for the repository and call =vc-pull= |
+| =P= | Open/reuse =vc-dir= for the repository and call =vc-push= |
+| =m=, =u=, =t=, =U= | Mark, unmark, toggle, or clear marks |
+| =x= | Run the default safe action on marked repos, or the current repo |
+| =X= | Run the default safe action on every eligible repo |
+| =!= | Run a shell command in marked repos, or the current repo |
+| =&= | Run an async shell command in marked repos, or the current repo |
+| =?= | Describe the dashboard mode and bindings |
+
+Prefix arguments are passed along, so =C-u += and =C-u P= behave like prefix calls to those VC commands.  VC commands may run asynchronously; press =g= when they finish to refresh the dashboard.
+
+The default safe bulk action is intentionally narrow: =git pull --ff-only= on a clean current branch whose upstream is behind and not ahead.  It does not push, delete branches, merge divergent branches, or touch dirty working trees.
+
+* Mark helpers
+
+The =*= prefix marks repositories by state:
+
+| Key | Marks |
+|-----+-------|
+| =* p= | Clean repos that can be safely pulled |
+| =* P= | Clean repos that can be safely pushed |
+| =* d= | Dirty repos |
+| =* b= | Repos with any local branch behind an upstream |
+| =* a= | Repos with any local branch ahead of an upstream |
+| =* s= | Repos with stale non-current local branches |
+
+* Emacs package repositories
+
+The dashboard is provider-based.  The default provider reads manifest files, but
+you can include other sources.
+
+To scan package repositories, set =repo-dashboard-emacs-package-roots= to
+one-level package clone roots and add the source:
+
+#+begin_src emacs-lisp
+(setopt repo-dashboard-emacs-package-roots
+        (list (expand-file-name "elpaca/repos" user-emacs-directory)))
+(add-to-list 'repo-dashboard-sources
+             'repo-dashboard-source-emacs-package-roots
+             t)
+#+end_src
+
+Or open only that source with:
+
+#+begin_src emacs-lisp
+(repo-dashboard-emacs-packages)
+#+end_src
+
+For other one-level roots, customize =repo-dashboard-extra-roots= and add
+=repo-dashboard-source-extra-roots= to =repo-dashboard-sources=.
+
+Large package roots can contain hundreds of Git repositories.  Keep this source
+opt-in if you mostly want the fast manifest view.
