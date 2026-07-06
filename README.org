@@ -55,6 +55,38 @@ Here is a complete example config using [[https://github.com/progfolio/elpaca][e
   (repo-scan-manifest-files '("~/dotfiles/repos.manifest")))
 #+end_src
 
+If you want packages declared with =use-package= to register themselves in
+=repo-scan-repos= at startup, define a local =:repo-scan= keyword before those
+declarations are expanded:
+
+#+begin_src emacs-lisp
+(defalias 'use-package-normalize/:repo-scan
+  'use-package-normalize-predicate)
+
+(defun use-package-handler/:repo-scan (name _keyword pred rest state)
+  "Handle :repo-scan keyword in `use-package' forms."
+  (use-package-concat
+   (when pred
+     `((with-eval-after-load 'repo-scan
+         (add-to-list 'repo-scan-repos ,(symbol-name name)))))
+   (use-package-process-keywords name rest state)))
+
+(setq use-package-keywords
+      (use-package-list-insert
+       :repo-scan (remove :repo-scan use-package-keywords) :after))
+#+end_src
+
+The keyword is inserted before =:after= so that =:after= does not delay
+registration.  With this in place, a package declaration such as:
+
+#+begin_src emacs-lisp
+(use-package my-package
+  :repo-scan
+  :ensure (:host github :repo "user/my-package.el"))
+#+end_src
+
+adds ="my-package"= to =repo-scan-repos= once =repo-scan= loads.
+
 * Usage
 
 In the dashboard:
