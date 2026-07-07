@@ -212,6 +212,33 @@
     (should (equal (repo-scan--branches-text record)
                    "local-only: topic-a +1, topic-b +1; drift: old -2"))))
 
+(ert-deftest repo-scan-branch-comparison-failure-is-not-ok ()
+  (let ((dir (make-temp-file "repo-scan-test" t)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'repo-scan--git-root)
+                   (lambda (_dir) dir))
+                  ((symbol-function 'repo-scan--current-branch)
+                   (lambda (_dir) "main"))
+                  ((symbol-function 'repo-scan--local-branch-lines)
+                   (lambda (_dir) '("main\torigin/main")))
+                  ((symbol-function 'repo-scan--ahead-behind)
+                   (lambda (&rest _args) nil))
+                  ((symbol-function 'repo-scan--included-local-branches)
+                   (lambda (&rest _args) '("main")))
+                  ((symbol-function 'repo-scan--unpushed-branches)
+                   (lambda (&rest _args) nil))
+                  ((symbol-function 'repo-scan--remote-problems)
+                   (lambda (&rest _args) nil))
+                  ((symbol-function 'repo-scan--dirty-count)
+                   (lambda (_dir) 0))
+                  ((symbol-function 'repo-scan--unpushed-count-for-branches)
+                   (lambda (&rest _args) 0)))
+          (let ((record (repo-scan--scan (repo-scan--descriptor dir))))
+            (should (equal (plist-get record :state) "remote problem"))
+            (should (equal (plist-get record :remote-problems)
+                           '("cannot compare main with origin/main")))))
+      (delete-directory dir t))))
+
 (ert-deftest repo-scan-details-column-expands ()
   (with-temp-buffer
     (repo-scan-mode)
@@ -304,6 +331,55 @@
               (should (equal (plist-get (car repo-scan--records) :state)
                              "ok")))))
       (delete-directory dir t))))
+
+(ert-deftest repo-scan-refresh-async-detects-pullable-current-branch ()
+  (let ((local (make-temp-file "repo-scan-local" t))
+        (upstream (make-temp-file "repo-scan-upstream" t))
+        (remote (make-temp-file "repo-scan-remote" t)))
+    (unwind-protect
+        (progn
+          (should (repo-scan--git-success-p remote "init" "--bare"))
+          (should (repo-scan--git-success-p upstream "init" "-b" "main"))
+          (should (repo-scan--git-success-p upstream "config" "user.email"
+                                            "repo-scan@example.invalid"))
+          (should (repo-scan--git-success-p upstream "config" "user.name"
+                                            "Repo Scan Test"))
+          (with-temp-file (expand-file-name "file.txt" upstream)
+            (insert "base\n"))
+          (should (repo-scan--git-success-p upstream "add" "file.txt"))
+          (should (repo-scan--git-success-p upstream "commit" "-m" "base"))
+          (should (repo-scan--git-success-p upstream "remote" "add" "origin"
+                                            remote))
+          (should (repo-scan--git-success-p upstream "push" "-u" "origin"
+                                            "main"))
+          (delete-directory local t)
+          (should (repo-scan--git-success-p
+                   (expand-file-name default-directory)
+                   "clone" "-b" "main" remote local))
+          (with-temp-file (expand-file-name "file.txt" upstream)
+            (insert "base\nremote\n"))
+          (should (repo-scan--git-success-p upstream "add" "file.txt"))
+          (should (repo-scan--git-success-p upstream "commit" "-m" "remote"))
+          (should (repo-scan--git-success-p upstream "push" "origin" "main"))
+          (should (repo-scan--git-success-p local "fetch" "origin" "main"))
+          (with-temp-buffer
+            (repo-scan-mode)
+            (setq-local repo-scan--source-functions
+                        (list (lambda ()
+                                (list (repo-scan--descriptor
+                                       local :group "test")))))
+            (let ((repo-scan-refresh-concurrency 1))
+              (repo-scan-refresh)
+              (repo-scan-test--wait-for-async-refresh)
+              (let ((record (car repo-scan--records)))
+                (should (equal (plist-get record :state) "pullable"))
+                (should (= (plist-get record :behind) 1))))))
+      (when (file-directory-p local)
+        (delete-directory local t))
+      (when (file-directory-p upstream)
+        (delete-directory upstream t))
+      (when (file-directory-p remote)
+        (delete-directory remote t)))))
 
 (ert-deftest repo-scan-call-vc-command-uses-vc-dir-buffer ()
   (let* ((record (list :path default-directory

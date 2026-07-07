@@ -625,14 +625,25 @@ CURRENT-BRANCH is used to mark the current row."
                    (counts (and upstream
                                 (repo-scan--ahead-behind
                                  dir branch upstream))))
-        (when counts
-          (push (list :branch branch
-                      :upstream upstream
-                      :ahead (car counts)
-                      :behind (cdr counts)
-                      :current (equal branch current-branch))
+        (when upstream
+          (push (append
+                 (list :branch branch
+                       :upstream upstream
+                       :ahead (or (car counts) 0)
+                       :behind (or (cdr counts) 0)
+                       :current (equal branch current-branch))
+                 (unless counts
+                   (list :problem
+                         (format "cannot compare %s with %s"
+                                 branch upstream))))
                 statuses))))
     (nreverse statuses)))
+
+(defun repo-scan--branch-problems (branches)
+  "Return remote problem strings from BRANCHES."
+  (delq nil (mapcar (lambda (status)
+                      (plist-get status :problem))
+                    branches)))
 
 (defun repo-scan--current-branch-status (record)
   "Return current branch status plist from RECORD, or nil."
@@ -762,6 +773,9 @@ CURRENT-BRANCH is used to mark the current row."
              (unpushed-branches
               (repo-scan--unpushed-branches
                root branch expected-local-branches))
+             (remote-problems
+              (append (repo-scan--remote-problems root descriptor)
+                      (repo-scan--branch-problems branches)))
              (record (repo-scan--plist-merge
                       base
                       :kind 'git
@@ -771,8 +785,7 @@ CURRENT-BRANCH is used to mark the current row."
                                   (format "(detached %s)"
                                           (or (repo-scan--short-head root)
                                               "?")))
-                      :remote-problems
-                      (repo-scan--remote-problems root descriptor)
+                      :remote-problems remote-problems
                       :dirty (repo-scan--dirty-count root)
                       :unpushed
                       (repo-scan--unpushed-count-for-branches
