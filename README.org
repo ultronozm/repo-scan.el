@@ -56,8 +56,11 @@ Here is a complete example config using [[https://github.com/progfolio/elpaca][e
 #+end_src
 
 If you want packages declared with =use-package= to register themselves in
-=repo-scan-repos= at startup, define a local =:repo-scan= keyword before those
-declarations are expanded:
+=repo-scan-repos= at startup, define the following local =:repo-scan= keyword
+before those declarations are expanded.  This is the recommended integration
+when your package declarations already name the repositories you want the
+dashboard to track, and those names match clone directories under
+=repo-scan-base-directory=, as they do with Elpaca's default layout:
 
 #+begin_src emacs-lisp
 (defalias 'use-package-normalize/:repo-scan
